@@ -23,6 +23,10 @@ uv run ruff check . --fix # lint
 uv run mypy src/          # types
 ```
 
+Plan (order, milestones, change protocol):
+
+- `docs/PLAN.md` — waves, milestone exit criteria, dispatch model, contract change protocol
+
 Design intent (why the system is shaped this way):
 
 - `docs/DESIGN.md` — problem, threat model, design decisions, flows, failure analysis

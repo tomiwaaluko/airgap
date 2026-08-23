@@ -50,7 +50,7 @@ tickets:
   - id: AIR-2
     title: "Serial protocol codec"
     tier: standard
-    depends_on: [AIR-1]
+    depends_on: [AIR-16]
     reads: ["docs/spec/01-serial-protocol.md"]
     body: |
       ## Context
@@ -115,7 +115,7 @@ tickets:
   - id: AIR-4
     title: "Arduino firmware: command interpreter"
     tier: design
-    depends_on: [AIR-2]
+    depends_on: [AIR-16]
     reads: ["docs/spec/04-firmware.md", "docs/spec/01-serial-protocol.md"]
     body: |
       ## Context
@@ -186,7 +186,7 @@ tickets:
       Checklist results pasted into the ticket, plus a photo of the wired board.
 
   - id: AIR-6
-    title: "Supervisor: validation, clamps, rate limits, relay interlock, fail-safe"
+    title: "Supervisor core: validation, clamps, rate limits, fail-safe"
     tier: safety-critical
     depends_on: [AIR-3]
     reads: ["docs/spec/02-supervisor.md"]
@@ -198,42 +198,35 @@ tickets:
       before opening the PR.
 
       ## Scope
-      Implement `src/airgap/supervisor.py` to the frozen contract: the command
-      allowlist, the value clamps, the four rate limits, the five-condition relay
-      interlock, and the fail-safe transition.
+      Implement `src/airgap/supervisor.py` to the frozen contract: the typed
+      command allowlist, the value clamps, the four rate limits, the tick
+      watchdog, and the safe-state transition.
+
+      **The relay interlock is NOT in this ticket.** Rules 4, 4a, 4b and 4c --
+      arming, verdict minting, the relay cycle, the dwell, lease renewal and
+      `lease_expired` scoping -- are AIR-17. This ticket provides the validated
+      `send()` that AIR-17 builds on. Leave a clearly-named seam for it; do not
+      stub the interlock in a way AIR-17 has to unpick.
 
       ## Acceptance criteria
-      Every test obligation listed at the end of `docs/spec/02-supervisor.md`,
-      each failure mode tested **independently**:
-      - all clamp boundaries
-      - each of the five interlock conditions failing on its own
-      - mismatched `req` never closes the relay
-      - button while disarmed never closes the relay
-      - a replayed button event closes the relay at most once
+      The non-interlock test obligations from `docs/spec/02-supervisor.md`, each
+      failure mode tested **independently**:
+      - all clamp boundaries (`n=0`, `n=1`, `n=5`, `n=6`)
+      - `led.state` outside the four-value enum is rejected, not coerced
+      - `lcd` truncation to 16 chars and non-ASCII stripping
+      - `arm.req` not matching the 8-hex pattern is rejected
+      - each of the four rate limits at its boundary
+      - `relay` commands are **rejected, never silently dropped**, on rate limit
       - 3001 ms of tick starvation enters the safe state
-      - `relay(closed=False)` succeeds in every state, including the safe state
-      - `relay` commands are rejected, never silently dropped, on rate limit
-      - **a passing interlock writes the audit row BEFORE sending relay close** --
-        assert the ordering, not just that both happened (review finding C2)
-      - **the Supervisor is the only producer of `decided_by=human`**, produced
-        in-process, never via HTTP (Rule 4a, review finding C1)
-      - an auto-approved request never closes the relay, however policy is set
-      - **Rule 4 condition 1 passes AFTER the request is resolved** -- the
-        Supervisor is still ARMED. Resolve-then-close must succeed; this was the
-        v1.1 deadlock (review 02 C1) and it must stay fixed
-      - **`relay` and `relay_renew` are distinct**: renew is ungated, is rejected
-        with `not_closed` on an open contact, and cannot create a closure
-      - **the full relay cycle in order**: close once, release the MCP caller,
-        renew at 3 s, dwell expiry, open, disarm, `btns==0`, dead time, next arm
-      - renewal continues AFTER the verdict is returned; it stops on dwell expiry,
-        explicit open, safe state or disarm -- never on verdict
-      - a consent-channel (non-relay-gated) request sends NO relay command at all
-      - `lease_expired` while armed mid-dwell does NOT change the verdict
-      - `lease_expired` while unarmed touches no queued request
+      - three consecutive unparseable lines enter the safe state
       - safe state resolves pending requests with verdict `link_lost`, NOT
-        `denied` with a reason string (review finding I3)
-      - the 2 s arming dead time holds and all buttons must be observed released
-        before the next request arms (review finding M4)
+        `denied` with a reason string (review 01 finding I3)
+      - `relay(closed=False)` succeeds in every state, including the safe state
+      - **only typed Command objects are accepted** -- no dict, no string, no
+        raw passthrough, no escape hatch
+
+      ## Out of scope
+      Rules 4, 4a, 4b, 4c and everything about the relay cycle. That is AIR-17.
 
       ## Verification
       `uv run pytest tests/test_supervisor.py -v` and paste the full test list.
@@ -241,7 +234,7 @@ tickets:
   - id: AIR-7
     title: "Data model and migrations"
     tier: standard
-    depends_on: [AIR-1]
+    depends_on: [AIR-16]
     reads: ["docs/spec/05-data-model.md"]
     body: |
       ## Context
@@ -295,7 +288,7 @@ tickets:
   - id: AIR-9
     title: "Broker: blocking approval core"
     tier: design
-    depends_on: [AIR-6, AIR-7]
+    depends_on: [AIR-17, AIR-11]
     reads: ["docs/spec/03-broker-api.md", "spikes/01-blocking-tool-call/FINDINGS.md"]
     body: |
       ## Context
@@ -476,7 +469,7 @@ tickets:
   - id: AIR-14
     title: "End-to-end integration test against MockTransport"
     tier: design
-    depends_on: [AIR-10, AIR-12]
+    depends_on: [AIR-10, AIR-12, AIR-18]
     reads: ["docs/spec/00-overview.md"]
     body: |
       ## Context
@@ -540,3 +533,148 @@ tickets:
 
       ## Verification
       `uv run python scripts/preflight.py`
+
+  - id: AIR-16
+    title: "Vocabulary single-source and spec lint"
+    tier: design
+    depends_on: [AIR-1]
+    reads: ["docs/PLAN.md", "docs/spec/01-serial-protocol.md", "docs/spec/05-data-model.md"]
+    body: |
+      ## Context
+      Two design reviews found the same class of defect repeatedly: the same word
+      meaning different things in different files. `denied` vs `link_lost`,
+      `ALWAYS-DENY` vs `never`, three vs four LED states, `expired` as a verdict
+      vs as a reason. Every one was documentation-only and every one would have
+      become a code bug. `PLAN.md` P1 calls this the dominant failure mode.
+
+      This ticket makes that class impossible to introduce silently. It runs
+      second, before any behaviour is written, because drift is cheapest to
+      prevent at time zero.
+
+      ## Scope
+      - `src/airgap/vocab.py`: the single definition of every closed vocabulary --
+        command names, ack error codes, event names, LED states, tone patterns,
+        verdicts, `decided_by` values, audit event names, policy actions. Python
+        StrEnum. Nothing else in the codebase may define these inline.
+      - `tests/test_spec_lint.py`: parses the markdown tables and fenced JSON in
+        `docs/spec/01-serial-protocol.md` and `docs/spec/05-data-model.md`,
+        extracts the vocabularies, and asserts **set equality in both
+        directions** against `vocab.py`. A term in the spec but not the code
+        fails. A term in the code but not the spec also fails -- one-way checking
+        is how dead vocabulary accumulates.
+      - `tests/test_no_stale_refs.py`: asserts no document outside `docs/reviews/`
+        references a removed concept. Seed it with `/decide`, removed in v1.2.
+      - Wire both into CI.
+
+      ## Acceptance criteria
+      - Adding a command to the `spec/01` table without adding it to `vocab.py`
+        fails the lint. **Demonstrate it**: make the edit, show the failure,
+        revert.
+      - Removing a verdict from `vocab.py` that `spec/05` still lists fails.
+      - Adding a term to `vocab.py` absent from the specs also fails.
+      - Reintroducing the string `/decide` into any non-review doc fails.
+      - Failure output names the term and both locations, not just "sets differ".
+
+      ## Out of scope
+      Linting prose, pin numbers, or anything that is not a closed vocabulary.
+      Keep the parser boring: a clever markdown parser that breaks whenever a
+      table is edited is worse than no lint at all.
+
+      ## Verification
+      `uv run pytest tests/test_spec_lint.py tests/test_no_stale_refs.py -v`
+
+  - id: AIR-17
+    title: "Relay interlock and cycle: Rules 4, 4a, 4b, 4c"
+    tier: safety-critical
+    depends_on: [AIR-6, AIR-8]
+    reads: ["docs/spec/02-supervisor.md", "docs/DESIGN.md", "docs/reviews/2026-08-23-design-review-02.md"]
+    body: |
+      ## Context
+      **This is the highest-risk ticket in the project.** Both design reviews
+      found their Critical defects here, and review 02 found one that review 01's
+      own fix had introduced. Read
+      `docs/reviews/2026-08-23-design-review-02.md` before writing anything -- it
+      documents a deadlock a careful reader would otherwise reproduce.
+
+      The single most important thing to understand: **`relay` closes and
+      `relay_renew` holds, and they are separate commands on purpose.** `relay` is
+      Rule-4-gated. `relay_renew` is not, because it acks `not_closed` on an open
+      contact and therefore cannot create a closure -- only extend one that an
+      authorised close already made. v1.1 merged them and made the contact
+      impossible to close after an approval.
+
+      ## Scope
+      - The arming state machine. **ARMED is Supervisor state, not a database
+        query**, and it survives the request's resolution -- released only after
+        the contact reopens.
+      - Rule 4: the five-condition interlock on `relay(closed=true)`.
+      - Rule 4a: a passing interlock mints `decided_by=human` in-process and
+        writes the audit row **before** anything moves.
+      - Rule 4b: the cycle -- close once, release the caller, renew at 3 s, dwell
+        out (`policies.dwell_s`, default 60 s), open, disarm, observe `btns == 0`,
+        2 s dead time, next arm.
+      - Rule 4c: `lease_expired` scoped to the armed request.
+
+      ## Acceptance criteria
+      Each tested independently. A happy-path test is not coverage here.
+      - each of the five interlock conditions failing **on its own**
+      - **resolve-then-close succeeds** -- condition 1 passes after the request is
+        resolved, because the Supervisor is still ARMED. This is the v1.1
+        deadlock; without this test the ticket is not done
+      - a mismatched `req` never closes the relay
+      - a button event while disarmed never closes the relay
+      - a replayed button event closes the relay **at most once**
+      - a button held across `arm` is suppressed and cannot approve
+      - `relay_renew` is accepted while closed, rejected `not_closed` while open,
+        and can never close an open contact
+      - the full cycle asserts **in order**, not merely that each step happened
+      - renewal continues after the verdict is returned; it stops on dwell expiry,
+        explicit open, safe state or disarm -- **never on verdict**
+      - a consent-channel (non-`relay_gated`) request sends **no relay command**
+      - the audit row precedes the relay close -- assert the ordering
+      - `lease_expired` while armed mid-dwell does not change the verdict
+      - `lease_expired` while unarmed touches no queued request
+      - the 2 s dead time and `btns == 0` both hold before the next arm
+
+      ## Verification
+      `uv run pytest tests/test_interlock.py -v` and paste the full test list.
+
+  - id: AIR-18
+    title: "airgap watch: full-fidelity terminal reader"
+    tier: standard
+    depends_on: [AIR-9]
+    reads: ["docs/PLAN.md", "docs/DESIGN.md", "docs/spec/03-broker-api.md"]
+    body: |
+      ## Context
+      A 16x2 LCD cannot distinguish `users_production` from `users_prod_bak`, so
+      a high-risk request must be read somewhere full-fidelity before approval.
+      Routing that through a browser puts template rendering and XSS on the T1
+      path (review 02 finding I7). A terminal reader gives the same fidelity with
+      materially less attack surface, and keeps a Next.js app off the MVP
+      critical path (`PLAN.md` section 4.3).
+
+      ## Scope
+      - `airgap watch` console entry point. Long-running, reads `ui`-scope routes.
+      - Shows the pending request in full: actor, tool name, **complete**
+        `tool_args`, justification, Warden risk class and reasoning, the policy
+        row matched, dial level, elapsed time, and the short code on the LCD.
+      - Updates within 1 s of a request arriving.
+      - Renders untrusted strings safely: escape control characters, no ANSI
+        passthrough from `tool_args` or `justification`. **Assume the actor
+        controls those strings and is hostile.**
+      - Shows link health and queue depth.
+
+      ## Acceptance criteria
+      - The short code shown matches the armed request's per-arm nonce, so a stale
+        view cannot be mistaken for a live one.
+      - `tool_args` is shown complete and never truncated. If it does not fit it
+        scrolls; it does not elide.
+      - An ANSI escape or control character in `justification` cannot move the
+        cursor, clear the screen, or alter any other field. Test with a hostile
+        fixture.
+      - **No approve capability**: no keybinding, no route, no token scope that
+        resolves a request. Approval is physical, always.
+      - Works with the `ui` token only; the `agent` token is rejected.
+
+      ## Verification
+      `uv run pytest tests/test_watch.py -v`

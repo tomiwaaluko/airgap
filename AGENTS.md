@@ -91,6 +91,7 @@ improve. If you think one is wrong, comment on the Linear ticket and stop.
 
 | Document | Read it when your ticket touches |
 |---|---|
+| `docs/PLAN.md` | sequencing, milestones, and the contract change protocol — read §10 before you ever consider editing a spec |
 | `docs/DESIGN.md` | **why** the system is shaped this way — read §4 (threat model) and §6 (design decisions) once, before your first ticket |
 | `docs/spec/00-overview.md` | anything — read this first, always |
 | `docs/spec/01-serial-protocol.md` | the wire format, codec, bridge, or firmware |
