@@ -1,8 +1,8 @@
 # Airgap — Design Specification
 
-**Version:** 1.1
+**Version:** 1.2
 **Date:** 2026-08-23
-**Status:** revised after design review 01 — see [`reviews/2026-08-23-design-review.md`](reviews/2026-08-23-design-review.md)
+**Status:** revised after design reviews 01 and 02 — see [`reviews/`](reviews/)
 **Author:** Tomiwa Aluko
 
 ---
@@ -24,10 +24,17 @@ them is a bug in one of them that a human must resolve.
 | Contracts | `spec/00`–`spec/05` | Frozen. Only a human may edit. |
 | Work items | `tickets/tickets.yaml` | Freely, as planning refines. |
 
-**v1.1 changed a great deal.** Review 01 found that v1.0 sold a stronger thesis in
-its goals and threat table than §4.4 actually supported, and that the human
-approval path was described three different ways across four documents. Those are
-resolved here. If you read v1.0, re-read §3, §4, §6 and §7.
+**v1.1** resolved review 01: v1.0 sold a stronger thesis in its goals and threat
+table than §4.4 supported, and described the human approval path three different
+ways across four documents.
+
+**v1.2** resolves review 02, which found that the lease v1.1 introduced *fought
+the interlock it was bolted onto*. `relay(closed=true)` is Rule-4-gated, so
+reusing it as a heartbeat made Rule 4, 4a, 4b and NF11 mutually unsatisfiable —
+as written, the contact could never close after an approval. The relay now has a
+separate ungated keepalive (`relay_renew`), an explicit dwell window with a
+defined end, and `relay_gated` is a column rather than an inference. If you read
+v1.1, re-read D8, D11, D12, §7.1 and §4.4's corollary.
 
 ---
 
@@ -70,7 +77,9 @@ That answer has three structural weaknesses:
 - **G6** — Reduce approval volume without exceeding a fixed authority envelope:
   an LLM triage layer proposes, and a deterministic policy layer bounds what that
   proposal can become. **The one-way valve is the policy layer, not the LLM.**
-- **G7** — Integrate with no bespoke work: any MCP client gets the gate for free.
+- **G7** — Integrate with no bespoke work: an MCP client gets the gate with no
+  Airgap-specific code. Verified against the Python SDK only (R5); "any client"
+  is the intent, not yet a tested claim.
 
 ### Non-goals
 
@@ -100,9 +109,12 @@ against.
 | **Z5** | Content the actor reads — web pages, docs, tool output | Actively hostile. |
 
 The critical property of this table: **Z2 is one zone, not several.** The broker,
-the Supervisor, the database and the dashboard share a process boundary and a
-host. There is no defence in depth *within* Z2, and claiming otherwise was the
-main error in v1.0.
+the Supervisor, the database, the MCP server and the dashboard are separate
+*processes* but share **one host and one operator account**, which is the boundary
+that matters. There is no defence in depth *within* Z2, and claiming otherwise was
+the main error in v1.0. (Process separation still buys something — it is why token
+scopes in `spec/03` are worth having against a *partially* compromised Z2 — but do
+not mistake it for a trust boundary.)
 
 ### 4.2 Threats defended against
 
@@ -118,12 +130,29 @@ main error in v1.0.
 | **T8** | Broker process killed while the relay is closed | Firmware relay **lease**: the contact opens if the host does not renew within 10 s (D8) | Always |
 | **T9** | Agent escalates its own autonomy level | The dial is a potentiometer. Readable, not writable. No code path exists to change it | Always |
 
-**On T1 and truncation.** The LCD is 16×2. `users_production` and
-`users_prod_bak` do not fit and do not disambiguate when truncated. The LCD is an
-**alert**, not the authoritative description of the action. Any request classed
-`high` must be read on the dashboard before approval, and the physical design
-(§9) reflects that: high-risk alerts show a short code that matches the dashboard
-row rather than a truncated table name.
+**On T1, truncation, and the cost of the dashboard cross-reference.** The LCD is
+16×2. `users_production` and `users_prod_bak` do not fit and do not disambiguate
+when truncated. So the LCD is an **alert**, not the authoritative description: a
+`high`-risk request shows a short code matching a dashboard row, and the human
+reads the real action there (§9).
+
+That is a real trade and review 02 named it (finding I7). Being precise about what
+it costs, because the finding's framing slightly overstates it:
+
+- It is **not** a new *trust* dependency. The LCD was already Z2-rendered — N-T2
+  has always said the host can lie about what you are approving. Moving the
+  authoritative text to the dashboard does not add a zone.
+- It **is** a new *attack surface* inside that zone. A browser, a template, and a
+  rendering path are more attackable than a 32-character serial write. XSS, or a
+  stale row whose short code happens to match, is a T1 bypass that the LCD-only
+  design did not have.
+- The short code is therefore generated per-arm and includes a nonce, so a stale
+  dashboard row cannot match a live request. That closes the stale-row case; it
+  does not close XSS, which is bounded only by N-T2.
+
+§2 rejected in-band *approval*. The press is still physical, so that still holds.
+What has moved in-band is the *description*, which was never out-of-band to begin
+with.
 
 ### 4.3 Threats explicitly NOT defended against
 
@@ -159,10 +188,20 @@ This is not a weakness to hide — it is the correct scope. A consent channel th
 is genuinely out-of-band is a real and currently missing security control.
 
 **Corollary — auto-approval and enforcement mode are incompatible.** Rule 4
-requires a verified button press before the relay may close. An auto-approved
-request never produces one. Therefore a relay-gated action **can never be
-auto-approved**; it always escalates, regardless of policy. This is enforced in
-the Supervisor rather than left to policy configuration (D12).
+requires a verified button press before the relay may close, and an auto-approved
+request never produces one.
+
+v1.1 stopped there and inferred "therefore relay-gated actions always escalate."
+**That inference is invalid** (review 02 finding I3): a missing interlock branch
+stops the *contact* closing, it does not change the *verdict*. An auto-approved
+lamp would have returned `APPROVED` to the agent while the lamp stayed dark — a
+silent enforcement failure, which is the worst kind.
+
+So the rule lives in the resolver instead, as an explicit narrowing step: a policy
+row with `relay_gated = true` forces `auto_approve → escalate` before resolution
+completes. `relay_gated` is a column on `policies`, not a convention or a
+hardcoded list, because implementers given a convention will pick one of three
+incompatible readings of it (D12).
 
 ---
 
@@ -173,7 +212,8 @@ credentials that can do real damage. One human, one desk, one device.
 
 | # | Use case | Expected outcome |
 |---|---|---|
-| U1 | Agent proposes a destructive DB migration | Escalate. Human denies. Agent proposes a soft-delete instead |
+| U1 | Agent proposes a destructive DB migration | Escalate. Human denies. Agent proposes a soft-delete instead. **Consent channel — no relay involved** |
+| U1b | Agent wants to energise a bench power supply (`relay_gated`) | Escalate — always, `auto_approve` is forced to `escalate` for gated rows. Human presses APPROVE, contact closes for the 60 s dwell, then opens |
 | U2 | Agent wants to read a file, 40th time today | Warden proposes auto-approve, policy permits. LCD notes it; **no LED, no flag, no tone.** No human interruption |
 | U3 | Agent processes a doc containing an injection payload | Injection detection is weak (N-T7). The reliable defence is that `file.delete` is not in the auto-approve envelope, so it escalates and the human denies |
 | U4 | Human is away from the desk when a request arrives | Request resolves `expired` after 30 min. Relay stays open |
@@ -265,7 +305,8 @@ privilege self-escalation (T9), and legible to anyone watching.
 ### D8 — Fail-safe is passive for power loss and leased for process loss
 
 **Chosen:** relay is active-HIGH, so de-energising opens it; **and** the firmware
-treats a closed relay as a lease that expires 10 s after the last host renewal.
+treats a closed relay as a lease that expires 10 s after the last host renewal,
+where renewal uses a **separate ungated command**, `relay_renew`.
 **Alternative:** software detects failure and commands the relay open.
 **Why:** v1.0 claimed a crashed process produces the safe state "with no code
 running." That is true for a cable pull — the bus-powered device loses power and
@@ -281,6 +322,43 @@ Two different failures needed two different mechanisms:
 Active detection was rejected for the first case because it requires the failing
 component to work during its own failure. The lease is acceptable for the second
 because expiry is a timeout, not a judgment, and it fails toward open.
+
+**Close and renew must be different commands.** v1.1 reused
+`relay(closed=true)` as the heartbeat, which was a deadlock: that command is
+Rule-4-gated, and Rule 4a resolves the request *before* sending the close, so
+condition 1 ("exactly one pending request") could never hold when it mattered.
+Rule 4b then required a 3 s resend while also saying to stop renewing on
+resolution — both sides of a contradiction, and the test list asked for both
+(review 02 finding C1).
+
+`relay_renew` is ungated because it **cannot create a closure** — on an open
+contact it acks `not_closed` and does nothing. It can only extend a closure the
+gated command already authorised. Rule 4's condition 1 also changed from "one
+pending request" to "the Supervisor is ARMED with R", which is Supervisor state
+that survives resolution.
+
+### D8b — The relay cycle has a defined end: the dwell window
+
+**Chosen:** an approved relay-gated request closes the contact for
+`policies.dwell_s` (default **60 s**), then the host opens it and disarms.
+**Alternative (a):** hold closed until the next request arms. **(b):** stop
+renewing at verdict and let the lease expire.
+**Why:** v1.1 never said when a *healthy* approved contact reopens, and review 02
+finding C2 showed both readings were unsafe. (b) means the MCP call has already
+returned `APPROVED` while the contact silently dies 10 s later — verdict and
+enforcement disagree, and the stray `lease_expired` could deny the next request.
+(a) means request A's contact is still closed when request B arms, so B is armed
+with enforcement already absent.
+
+There is no completion signal from the actor — D10 keeps the tool surface to one
+call, deliberately — so a bounded actuation window is the honest mechanism:
+*"you have 60 seconds to run the pump."* The MCP caller is released at step 2 of
+the cycle, as soon as the verdict is durable, not when the dwell ends; making an
+agent wait 60 s for a lamp would be a worse trade than the small window in which
+the verdict is known and the contact is still closing.
+
+`lease_expired` is scoped to the armed request and can never resolve, deny, or
+disturb a queued one (`spec/02` Rule 4c).
 
 ### D9 — Hash-chained audit log, honestly scoped
 
@@ -306,32 +384,49 @@ Z2 cannot rewrite retroactively without the device. Noted as future work in
 **Why:** every additional tool is surface an actor agent can use to reason its way
 around the gate.
 
-### D11 — The human verdict path is in-process; `/decide` cannot produce it
+### D11 — Every verdict is in-process; there is no `/decide` endpoint
 
 **Chosen:** button event → bridge decodes → Supervisor runs the Rule 4 interlock →
-Supervisor resolves the request **in-process**. `POST /decide` exists only for
-system and policy verdicts and **cannot set `decided_by=human`**; it rejects that
-value. The broker binds to `127.0.0.1` and requires a token that is generated at
-startup and never leaves the process for any endpoint that can resolve a request.
+Supervisor resolves the request **in-process**. **There is no `/decide` endpoint
+at all**: the Warden, the resolver and the Supervisor all run inside the broker
+process, so no legitimate producer of any verdict is remote. Tokens are scoped —
+`agent` reaches only `POST /request_approval`, `ui` reaches only reads and policy
+edits — and neither can resolve a request.
 **Alternative:** the bridge POSTs the human verdict to `/decide`, as v1.0
 implied.
 **Why:** v1.0 described the human path three ways across four documents, and the
 `/decide` variant is a hole: for consent-channel actions the relay is irrelevant,
 so the interlock gates nothing and any local caller — a co-resident agent, a page
-issuing a simple cross-origin POST — could produce `APPROVED`. Binding
-`decided_by=human` to the interlock, in one process, closes it. G1 is a claim
-about the buttons; D11 is what makes that claim reach the verdict.
+issuing a simple cross-origin POST — could produce `APPROVED`.
 
-### D12 — Auto-approval can never close the relay
+v1.1 fixed only half of it by rejecting `decided_by=human` while keeping the
+endpoint for `policy` and `system`. Review 02 finding I4 showed that still lets a
+co-resident agent holding the MCP token post `decided_by=policy` and unblock a
+consent-channel call with no button and no policy evaluation. Removing the
+endpoint removes the class; keeping it would mean defending an interface with no
+legitimate caller. G1 is a claim about the buttons; D11 is what makes that claim
+reach the verdict.
 
-**Chosen:** the Supervisor refuses `relay(closed=true)` for any request not
-resolved by a human press, structurally — it is the same Rule 4 interlock, which
-has no auto-approve branch.
-**Alternative:** let policy decide whether an auto-approved action may actuate.
-**Why:** enforcement mode exists precisely because someone should look. A
-configuration that could auto-actuate physical hardware is a configuration
-mistake waiting to happen, so the design removes the option rather than
-documenting it as dangerous.
+### D12 — A `relay_gated` row can never resolve to `auto_approve`
+
+**Chosen:** `policies.relay_gated` is a boolean column. The **resolver** forces
+`auto_approve → escalate` for any gated row, as an explicit narrowing step,
+*before* a verdict is issued. The interlock separately refuses to close a contact
+without a button press.
+**Alternative (a):** let policy decide whether an auto-approved action may
+actuate. **(b):** infer the rule from the interlock, as v1.1 did.
+**Why:** (a) means a configuration mistake can auto-actuate physical hardware.
+(b) does not work — and this is the subtle part review 02 caught (finding I3).
+The interlock having no auto-approve branch stops the *contact* from closing; it
+does not change the *verdict*. Under (b) an auto-approved lamp returns `APPROVED`
+to the agent and stays dark: the agent believes it acted, the world disagrees, and
+nothing reports the gap. Enforcement failures must be loud, so the rule belongs in
+the resolver where it changes the answer, not in the interlock where it only
+changes a side effect.
+
+`relay_gated` is a column rather than a hardcoded list because a convention gets
+read three incompatible ways — hardcode a list, treat everything as gated, or
+treat nothing as gated — and two of those are silently unsafe.
 
 ---
 
@@ -340,7 +435,15 @@ documenting it as dangerous.
 Note the audit ordering in all three: **the record is written before the world
 changes**, per invariant 5 and NF8. v1.0's diagrams had this backwards.
 
-### 7.1 Escalation to a human, approved
+### 7.1 Escalation to a human, approved — consent channel
+
+This is the **canonical** path, and it is a consent-channel action: `db.drop_table`
+is not relay-gated, so no relay command is sent at all. v1.1 drew the canonical
+flow with a relay close on a `DROP TABLE`, which trained implementers to treat
+every approve as relay-gated and contradicted §4.4 (review 02 finding I5).
+
+The MCP text block returned is exactly `APPROVED: <reason>` per `spec/03` — the
+diagram uses a dash only because Mermaid parses a second colon poorly.
 
 ```mermaid
 sequenceDiagram
@@ -369,12 +472,44 @@ sequenceDiagram
     H->>D: presses APPROVE
     D-->>S: ev btn, which approve, req a91f3c2e
     S->>S: Rule 4 interlock - 5 conditions
+    S->>B: audit button
     S->>B: audit resolved, decided_by=human
-    Note over S,B: in-process. never over HTTP - D11
-    S->>D: cmd relay, closed true
-    Note over S,D: lease renewed every 3 s while closed
+    Note over S,B: in-process. no HTTP path exists - D11
     B-->>M: approved true
-    M-->>A: APPROVED - human pressed APPROVE
+    M-->>A: APPROVED with reason
+    S->>D: cmd disarm
+    Note over S,D: no relay command. not relay-gated
+```
+
+Audit events for this path, in order: `request_created`, `warden_verdict`,
+`armed`, `button`, `resolved`. A relay-gated path adds `relay_closed` and
+`relay_opened` (`spec/05`).
+
+### 7.1b The relay cycle, for a `relay_gated` action
+
+```mermaid
+sequenceDiagram
+    participant B as Broker
+    participant S as Supervisor
+    participant D as Arduino
+    participant H as Human
+
+    H->>D: presses APPROVE
+    D-->>S: ev btn, which approve, req R
+    S->>S: Rule 4 - still ARMED with R
+    S->>B: audit resolved, decided_by=human
+    B-->>B: release the MCP caller now
+    S->>D: cmd relay, closed true
+    Note over S,D: gated. sent once. starts 10s lease
+    loop every 3 s for the dwell window
+        S->>D: cmd relay_renew
+        Note over S,D: ungated. cannot create a closure
+    end
+    Note over S: dwell expires - default 60 s
+    S->>D: cmd relay, closed false
+    S->>B: audit relay_opened
+    S->>D: cmd disarm
+    Note over S,D: then btns==0 and 2 s dead time before next arm
 ```
 
 ### 7.2 Warden proposes auto-approve, policy overrides
@@ -441,7 +576,9 @@ sequenceDiagram
 | F9 | Two requests race to arm | Interlock rejects second | Second stays queued | D5 serialisation | Queue grows if the human is away; expiry drains it |
 | F10 | **Relay fails welded shut** | Not detectable in software | Enforcement silently absent | Bring-up test; periodic manual check | **Real and unmitigated.** A monitored-contact relay is the fix; out of scope for v1 |
 | F11 | Clock skew, device vs host | — | `t` fields misaligned | Host timestamps authoritatively; device `t` is diagnostic | None |
-| F12 | Dashboard or a local process attempts to approve | `decided_by=human` rejected on `/decide` | Attempt fails and is audited | D11 | None while Z2 is intact; void under N-T2 |
+| F12 | Dashboard or a local process attempts to resolve a request | No such route exists | 404. Nothing to reject because nothing accepts | D11 — the endpoint was removed, not hardened | None while Z2 is intact; void under N-T2 |
+| F13 | Host stops renewing mid-dwell (GC pause, load) | `lease_expired` | Contact opens early. Verdict stays `approved`; the actuation window was cut short | Renew at 3 s against a 10 s lease — three missed renewals before expiry | Actor is not told the window closed early. D10 gives it no channel |
+| F14 | `lease_expired` arrives with no armed request | Event handler | Audited, contact confirmed open, nothing else touched | Rule 4c scoping | None — the earlier bug where a stray event could deny a queued request is closed |
 
 F10 and F2 deserve emphasis. F10 because a welded relay defeats G4 invisibly. F2
 because the 10 s lease window is a deliberate trade: shorter risks spurious opens
@@ -504,7 +641,9 @@ distinguished by `alert` ×3 and red rather than by text.
 | NF8 | Audit durability | Every decision written **before** it is acted on | A decision that isn't recorded didn't happen |
 | NF9 | Restart behaviour | No approval survives a broker restart | Restart is not a trust event |
 | NF10 | Offline capability | Device works with no network; only the Warden needs it | Loss of internet degrades to all-escalate, not to open |
-| NF11 | Relay lease renewal / expiry | renew every 3 s, expire at 10 s | D8; bounds F2 |
+| NF11 | Relay lease renewal / expiry | `relay_renew` every 3 s, expire at 10 s, **fixed not tunable** | D8; bounds F2. Three missed renewals before expiry |
+| NF13 | Relay dwell window | `policies.dwell_s`, default 60 s | D8b. The actuation window; there is no completion signal from the actor |
+| NF14 | MCP caller release | at verdict, not at dwell end | An agent must not wait 60 s for a lamp |
 | NF12 | Inbound request rate limit | 6/min per `tool_name` per actor, then reject | T4; the serial rate limits do not bound this |
 
 ---
@@ -519,7 +658,9 @@ Arduino is on USB. The only outbound call is to the Anthropic API for the Warden
 [operator's machine]  ← this entire box is Z2; it fails as a unit
   ├── mcp_server        stdio, or 127.0.0.1 streamable-http
   ├── broker            127.0.0.1 only, never 0.0.0.0
-  │     └── /decide     system + policy verdicts only; rejects decided_by=human
+  │                     NO endpoint resolves a request. /decide does not exist.
+  │                     tokens are scoped: agent -> request_approval only,
+  │                                        ui    -> reads + policy edits only
   ├── supervisor        in-process with the broker, owns the serial port,
   │                     and is the ONLY producer of decided_by=human  (D11)
   ├── postgres          localhost
@@ -527,8 +668,9 @@ Arduino is on USB. The only outbound call is to the Anthropic API for the Warden
   └── USB ──────────────► Arduino UNO ──► relay ──► controlled load
 ```
 
-The dashboard has **no approve button and no approve endpoint to call.** Adding
-one would reintroduce exactly the software approval path D11 removes.
+The dashboard has **no approve button and no approve endpoint to call** — not a
+rejected one, an absent one. Adding either would reintroduce exactly the software
+approval path D11 removes.
 
 **Explicitly not v1:** hosting the broker remotely. That puts a network between
 the Supervisor and the device, adds a partition mode that looks like link loss,
@@ -551,9 +693,9 @@ deployment first — nginx defaults `proxy_read_timeout` to 60 s.
 | R7 | **Policy table is software-writable (N-T8)** | Z2 compromise can widen authority | v1 audits policy edits. Gating widening edits behind the dial is the real fix; not in v1 |
 | R8 | **Policy matches tool name, not args** | A broad tool in the envelope auto-approves anything | v1 forbids broad tools in the envelope by convention. Arg-level matching is future work |
 | R9 | **Audit chain is unkeyed and unanchored (D9)** | Z2 superuser can rewrite history undetectably | Downgrade the claim now; EEPROM anchoring is the intended fix |
-| R10 | 10 s lease window (F2) | Unsupervised closed contact after a broker kill | Accepted. Tunable; shorter risks spurious opens |
+| R10 | 10 s lease window (F2) | Unsupervised closed contact after a broker kill | Accepted and **fixed, not tunable** (Q4). Shorter risks spurious opens under load |
 
-**Open questions — resolved in v1.1:**
+**Open questions — resolved:**
 
 1. ~~Should `NEVER` persist across restarts?~~ **Yes, persists.** T4 depends on it,
    and a class you have rejected is a durable judgment. Stored in `policies` as
@@ -566,10 +708,17 @@ deployment first — nginx defaults `proxy_read_timeout` to 60 s.
    `policies.min_dial`. Blunt, and deliberately so: a dial whose meaning varies by
    context is not readable at a glance, which defeats its purpose.
 
+4. ~~Should the lease interval be tunable?~~ **Fixed at 10 s.** R10 previously
+   called it tunable while Q4 leaned fixed; fixed wins, so that every deployment
+   has the same worst-case unsupervised window and the bring-up test (`spec/04`
+   item 7) asserts one number. The *dwell* is per-policy (`dwell_s`); the *lease*
+   is not.
+
 **Still open:**
 
-4. Should the lease interval be tunable per deployment, or fixed at 10 s to keep
-   the failure envelope uniform? Leaning fixed.
+5. Should a cut-short dwell (F13) be surfaced to the actor somehow? D10's
+   one-tool rule says no channel exists. Leaning accept, and let the audit trail
+   carry it.
 
 ---
 
@@ -585,9 +734,15 @@ outside it. Specifically:
 - T1 is **not** claimed to be demonstrable in general, because N-T2 makes an
   honest demonstration impossible. What is tested: a high-risk request never puts
   a truncatable identifier on the LCD, and the dashboard carries the full action.
-- T3's test must assert that `POST /decide` **rejects** `decided_by=human` from
-  every caller, and that no dashboard route can resolve a request. Testing the
-  GPIO path alone would pass while the hole stayed open.
+- T3's test must enumerate every route the broker exposes and assert that **none
+  of them resolves a request**, for any `decided_by` value — including `policy`,
+  which v1.1 still allowed over HTTP. It must also assert that a caller holding
+  the `agent` token cannot reach a `ui` route and vice versa. Testing the GPIO
+  path alone would pass while the hole stayed open.
+- A test must assert Rule 4, 4a, 4b and NF11 **together**: resolve, then close,
+  then renew past 10 s, then dwell out, then open. v1.1's wording made that test
+  unwritable without picking a winner among contradictory rules, which is how
+  review 02 found the deadlock.
 - T4's test must exercise `/request_approval` retry flooding, not the serial rate
   limits, which bound a different thing.
 - T6's test must show the chain detecting an application-level edit **and** must

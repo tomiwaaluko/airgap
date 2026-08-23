@@ -35,14 +35,29 @@ The device **must** ack every command within 100 ms.
 
 Field rules:
 
-- `cmd` — one of exactly: `ping`, `led`, `tone`, `flag`, `relay`, `lcd`, `arm`, `disarm`. Unknown → error ack.
-- `relay.closed` — **closing is a lease, not a latch.** Each `{"cmd":"relay","closed":true}`
-  renews a 10 000 ms lease. If the device does not receive a renewal before the
-  lease expires it opens the contact on its own and emits
-  `{"ev":"lease_expired","t":...}`. The host renews every 3000 ms while it intends
-  the contact to stay closed. `{"cmd":"relay","closed":false}` opens immediately
-  and cancels the lease. This is the *only* thing the device decides autonomously,
-  and it is a timeout rather than a judgment — see `DESIGN.md` D8.
+- `cmd` — one of exactly: `ping`, `led`, `tone`, `flag`, `relay`, `relay_renew`,
+  `lcd`, `arm`, `disarm`. Unknown → error ack.
+
+### The relay is closed by one command and held by a different one
+
+This separation is load-bearing. `relay` is gated by the Supervisor's Rule 4
+interlock; `relay_renew` deliberately is not. Reusing `relay` as the heartbeat
+made the two rules contradictory — see review 02 finding C1.
+
+| Command | Gated? | Effect |
+|---|---|---|
+| `{"id":n,"cmd":"relay","closed":true}` | **Yes**, Rule 4 | `OPEN → CLOSED`. Starts a 10 000 ms lease. Rejected with `not_armed` if the device is disarmed |
+| `{"id":n,"cmd":"relay_renew"}` | **No** | Extends the lease **only if the contact is already closed**. If open, acks `{"ok":false,"err":"not_closed"}` and changes nothing |
+| `{"id":n,"cmd":"relay","closed":false}` | **No** | `CLOSED → OPEN` immediately, cancels the lease. Always accepted, in every state |
+
+`relay_renew` is safe to leave ungated because it cannot create a closure — it can
+only extend one that a gated close already authorised. It is a keepalive, not a
+command.
+
+If the lease expires the device opens the contact itself and emits
+`{"ev":"lease_expired","t":...}`. The host renews every 3000 ms for as long as it
+intends the contact to stay closed. This is the only thing the device decides
+autonomously, and it is a deadline rather than a judgment — see `DESIGN.md` D8.
 - `led.state` — one of `off`, `green`, `amber`, `red`. Amber is red+green both on.
 - `tone.pattern` — one of `ok`, `deny`, `alert`. `n` clamps to 1..5.
 - `lcd.l1` / `lcd.l2` — truncated to 16 chars by the **host**, not the device.
@@ -81,11 +96,25 @@ Field rules:
 ### Telemetry — every 1000 ms, unconditionally
 
 ```json
-{"ev":"tick","dial":7,"relay":false,"armed":true,"lease_ms":0,"t":92044}
+{"ev":"tick","dial":7,"relay":false,"armed":true,"lease_ms":0,"btns":0,"t":92044}
 ```
 
 - `lease_ms` — milliseconds remaining on the relay lease, `0` when the contact is
   open. Lets the host detect a lease it is failing to renew before it expires.
+- `btns` — 3-bit field of buttons **currently held**: bit 0 `approve`, bit 1
+  `deny`, bit 2 `never`. `0` means all released. Without this the host cannot
+  observe release, and `DESIGN.md` D5's "all buttons released before arming"
+  requirement is unimplementable (review 02 finding I2).
+
+### Held-button suppression
+
+On receiving `arm`, the device records which buttons are held at that instant and
+**suppresses their events until they are released and pressed again**. A finger
+resting on APPROVE when a request arms cannot approve it.
+
+This is enforced on the device because only the device can see the transition.
+The host-side dead time in `DESIGN.md` D5 handles the timing gap; this handles the
+held-through case, which dead time alone does not close.
 
 - `dial` — autonomy level, integer 0..10, mapped from `A0` by the **firmware**.
 - Absence of ticks for **3000 ms** is a link failure. See fail-safe in
@@ -99,8 +128,10 @@ Field rules:
 3. Any line that fails to parse as JSON is **dropped silently** by both sides and
    counted. It is never partially interpreted.
 4. `id` wraps at 65535 back to 1. Acks are matched on `id` alone.
-5. On `boot`, the host must re-`arm` if a request was pending. The device comes
-   up disarmed with the relay **open**.
+5. On `boot`, the device comes up disarmed, relay **open**, flag **up**. The host
+   **must not re-`arm`**: a device reset mid-request resolves that request as
+   `denied` with reason `device_reset`. A power cycle is a denial, never a
+   resumption (`spec/04` boot sequence, `DESIGN.md` F3).
 
 ## Reference codec behaviour
 

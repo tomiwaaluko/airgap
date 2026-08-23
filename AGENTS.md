@@ -13,10 +13,13 @@ fully before writing code, then read the contract documents your ticket names.
 An AI agent that wants to take an irreversible action — drop a table, send money,
 publish something — calls an MCP tool called `request_approval`. That tool call
 **blocks**. Meanwhile an Arduino on the user's desk raises a servo-driven flag,
-turns an LED red, beeps, and holds a relay contact **open**, physically
-preventing the action. The call does not return until a human presses a button
-on that device. Then the relay closes and the agent proceeds — or it doesn't, and
-the agent is told no.
+turns an LED red, and beeps. The call does not return until a human presses a
+button on that device.
+
+For the subset of actions whose policy row sets `relay_gated`, the device also
+holds a relay contact **open**, physically preventing the action until approval.
+**Most actions are not relay-gated** and never involve the relay at all — do not
+write the relay cycle into the general path.
 
 **Be precise about what that buys**, because an imprecise version of this
 sentence will lead you to write code that overclaims. Airgap has two modes:
@@ -45,8 +48,11 @@ comments instead of implementing it.**
 1. **The LLM never writes to the serial port.** Every device command goes through
    `Supervisor.send()`, which validates against a static allowlist of typed
    command objects. There is no raw passthrough and you must not add one.
-2. **Deny by default.** Lost serial link, crashed broker, timeout, ambiguous
-   state, or an unparseable frame all resolve to *denied* with the relay **open**.
+2. **Fail closed, with the right verdict.** Lost serial link, crashed broker,
+   timeout, device reset, and unparseable frames all leave the relay **open** and
+   release every blocked caller with a refusal. The *verdict* recorded differs and
+   the distinction matters: `link_lost`, `expired`, and `denied`/`device_reset`
+   are peers, and none of them is "denied with a reason string" (`spec/05`).
 3. **The autonomy dial is read-only to software.** Firmware reports `A0`. Nothing
    in the system can set it. That is the entire point of having a physical dial.
 4. **The policy engine can only narrow the Warden's verdict.** See the resolution
@@ -57,16 +63,20 @@ comments instead of implementing it.**
    `docs/spec/02-supervisor.md`.
 7. **Only `src/airgap/supervisor.py` may import `src/airgap/transport.py`.**
    There is a test that enforces this by scanning the source tree.
-8. **`decided_by="human"` has exactly one producer: the Supervisor, in-process,
-   after the Rule 4 interlock passes.** `POST /decide` rejects that value with
-   `403` from every caller. The dashboard has no approve route, no approve button,
-   and no token scope that can resolve a request. If you find yourself adding a
-   way for software to say a human approved something, you have just removed the
-   entire point of the project.
-9. **A closed relay is a lease, renewed every 3 s and expiring at 10 s.** Killing
-   the broker must not leave the contact closed.
-10. **Auto-approval can never close the relay.** The interlock has no
-    auto-approve branch, so relay-gated actions always escalate.
+8. **No HTTP surface resolves a request — there is no `/decide` endpoint.**
+   Every verdict is produced in-process: `human` by the Supervisor after Rule 4a,
+   `policy`/`warden_auto` by the resolver, `system` by broker timers. The
+   dashboard has no approve route, button, or token scope. If you find yourself
+   adding a way for software to say a human approved something, you have removed
+   the entire point of the project.
+9. **The relay is closed by `relay`, held by `relay_renew`.** `relay` is
+   Rule-4-gated; `relay_renew` is not, because it can only extend a closure that
+   a gated close already authorised, never create one. Do not merge them — that
+   was the v1.1 deadlock.
+10. **A `relay_gated` policy row can never resolve to `auto_approve`.** The
+    resolver forces it to `escalate`. Do not try to infer this from the interlock:
+    a missing interlock branch stops the contact closing, it does not change the
+    verdict, and the difference is a lamp that reports APPROVED while staying off.
 
 ---
 
@@ -221,7 +231,10 @@ reasoning effort; it also tells you how much care to take.
 - **Auto-approved requests light nothing up.** No LED, no flag, no tone — LCD
   only. Green means "a human just approved this" and nothing else, because with
   FIFO queuing a green flash could appear while a *different* request sits armed.
-- **`POST /decide` refusing `decided_by=human` is not an oversight to fix.** See
-  invariant 8.
+- **The absence of a `/decide` endpoint is not a missing feature.** See
+  invariant 8. Every verdict is produced in-process, on purpose.
+- **`relay_renew` returning `not_closed` on an open contact is correct.** A
+  keepalive that could close a contact would be a close, and would need the
+  interlock.
 - **`expired` and `link_lost` are verdicts, not reasons.** A timeout is not a
   denial and the audit trail must be able to tell them apart.

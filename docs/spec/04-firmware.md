@@ -37,7 +37,7 @@ Every hardware PWM pin on the UNO is claimed by something we need. That is why
 the status LED is driven **digitally** with two discrete channels instead of as a
 PWM RGB LED: a PWM RGB LED on D3/D5/D6 would fight `tone()` on Timer2 and the
 red channel would glitch every time the buzzer sounded. Two digital pins give
-the three states the protocol actually defines (`green`, `amber`, `red`) with no
+the four states the protocol defines (`off`, `green`, `amber`, `red`) with no
 timer contention at all.
 
 ## Boot sequence
@@ -56,17 +56,22 @@ comes up **up** (blocked) and stays there until the host disarms.
 
 ## The relay lease
 
-The one thing the device decides on its own. It is a timeout, not a judgment, so
-it does not conflict with "the device never drives its own relay" — the host
-still decides to *close*; the device only enforces a deadline on how long a close
+The one thing the device enforces on its own. It is a deadline, not a judgment:
+the host still decides to *close*; the device only bounds how long a close
 survives without contact.
 
-- `relay(closed=true)` closes the contact and starts or renews a **10 000 ms**
-  lease.
+- `relay(closed=true)` closes the contact and starts a **10 000 ms** lease. This
+  is the Rule-4-gated command and the host sends it exactly once per approval.
+- `relay_renew` extends the lease to 10 000 ms **only if already closed**. If
+  open it acks `{"ok":false,"err":"not_closed"}` and changes nothing. The host
+  sends it every 3000 ms for the duration of the dwell window.
 - If the lease expires, the device opens the contact itself and emits
   `{"ev":"lease_expired","t":...}`.
 - `relay(closed=false)` opens immediately and cancels the lease.
 - `tick` reports `lease_ms` remaining, `0` when open.
+
+Close and renew are **separate commands** because the close is interlocked and
+the renew must not be -- see `spec/01` and review 02 finding C1.
 
 This exists because passive fail-safe only covers power loss. If the broker is
 killed while the host stays powered, USB power remains, the sketch keeps looping,
@@ -85,8 +90,26 @@ DISARMED  --arm(req)-->  ARMED  --btn approve--> APPROVED --(host relay cmd)--> 
 
 - In `DISARMED`, button presses still emit events but with `"req":null`.
 - In `ARMED`, button events carry the armed `req`.
-- The device **never** drives the relay itself. It reports; the host commands.
-  This keeps the interlock in one place (the Supervisor) rather than two.
+- On `arm`, the device records which buttons are **currently held** and suppresses
+  their events until released and pressed again. A finger already resting on
+  APPROVE cannot approve the request that just armed.
+- The device does not **decide** to move the relay -- it reports, the host
+  commands. It enforces exactly one thing on its own: the lease deadline below.
+  v1.1 said "never drives the relay itself", which contradicted the lease it
+  introduced in the same document (review 02 finding I6).
+
+### Relay state, orthogonal to arm state
+
+```
+OPEN --relay closed=true (host, Rule-4-gated)--> CLOSED
+CLOSED --relay_renew (host, every 3s)--> CLOSED   (lease extended to 10s)
+CLOSED --relay closed=false (host)--> OPEN        (lease cancelled)
+CLOSED --10s with no renew--> OPEN + emit lease_expired
+```
+
+`relay_renew` while `OPEN` is a no-op that acks `{"ok":false,"err":"not_closed"}`.
+It can never create a closure -- that is why the host is allowed to send it
+without passing the interlock.
 
 ## Loop obligations
 
@@ -100,6 +123,9 @@ The main loop must complete in **under 5 ms** in all cases. Consequences:
 - The dial is read every loop and low-pass filtered; `tick` reports the filtered
   value mapped `0..1023 -> 0..10` with hysteresis of ±1 raw step to stop it
   flickering between levels.
+- `tick` also reports `btns`, a 3-bit held-button field, and `lease_ms`.
+- The lease is checked every loop against `millis()`. Expiry drives the relay pin
+  LOW and emits `lease_expired` in the same pass.
 
 ## Bring-up checklist (ticket AIR-5, human task)
 
@@ -109,7 +135,9 @@ Do these in order on real hardware before trusting any of it:
 2. Each of the three buttons emits exactly one event per press (debounce works).
 3. The dial reports 0 at one extreme and 10 at the other, monotonically.
 4. Servo reaches both flag positions without buzzing at rest (detach if it hums).
-5. Relay clicks on `relay(closed=true)` and the load actually switches.
+5. Relay clicks on `relay(closed=true)` and the load actually switches, and
+   `relay_renew` holds it closed past 10 s while `relay_renew` alone on an open
+   contact does nothing and acks `not_closed`.
 6. **Unplug the USB cable while the relay is closed.** The relay must open.
    If it does not, the wiring is inverted and everything downstream is unsafe.
 7. **Kill the host process with USB still connected, relay closed.** The contact

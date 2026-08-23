@@ -130,10 +130,14 @@ tickets:
       - Non-blocking throughout. No `delay()` anywhere. Main loop under 5 ms.
       - 25 ms button debounce via `millis()`.
       - Dial low-pass filtered, mapped 0..1023 -> 0..10 with ±1 raw-step hysteresis.
-      - **Relay lease**: `relay(closed=true)` starts/renews a 10 000 ms lease; on
-        expiry the device opens the contact itself and emits `lease_expired`.
-        `tick` reports `lease_ms` remaining. This is the only autonomous device
-        behaviour and it is a deadline, not a judgment (DESIGN.md D8).
+      - **Relay lease, two commands**: `relay(closed=true)` closes and starts a
+        10 000 ms lease; `relay_renew` extends it ONLY if already closed and acks
+        `not_closed` otherwise. They are separate commands on purpose -- merging
+        them was the v1.1 deadlock (review 02 C1). On expiry the device opens the
+        contact itself and emits `lease_expired`.
+      - `tick` reports `lease_ms` and `btns` (3-bit held-button field).
+      - **Held-button suppression**: on `arm`, record which buttons are held and
+        suppress their events until released and pressed again.
       - `README.md` in `firmware/` with the wiring table and how to flash.
 
       ## Acceptance criteria
@@ -143,6 +147,8 @@ tickets:
       - Button events while disarmed carry `"req":null`.
       - Relay lease expires at 10 s without renewal, opens the contact, and emits
         `lease_expired`. Verifiable in simulation or on hardware in AIR-5.
+      - `relay_renew` on an open contact acks `not_closed` and does NOT close it.
+      - A button held across an `arm` emits no event until released and re-pressed.
       - Boot drives the flag UP (blocked) and the relay open, always.
       - No `delay()` call anywhere in the sketch (grep it in the PR).
 
@@ -212,9 +218,18 @@ tickets:
       - **the Supervisor is the only producer of `decided_by=human`**, produced
         in-process, never via HTTP (Rule 4a, review finding C1)
       - an auto-approved request never closes the relay, however policy is set
-      - the lease is renewed at 3 s while closed and renewal stops immediately on
-        resolution or safe state
-      - `lease_expired` resolves any pending request as `denied` / `lease_expired`
+      - **Rule 4 condition 1 passes AFTER the request is resolved** -- the
+        Supervisor is still ARMED. Resolve-then-close must succeed; this was the
+        v1.1 deadlock (review 02 C1) and it must stay fixed
+      - **`relay` and `relay_renew` are distinct**: renew is ungated, is rejected
+        with `not_closed` on an open contact, and cannot create a closure
+      - **the full relay cycle in order**: close once, release the MCP caller,
+        renew at 3 s, dwell expiry, open, disarm, `btns==0`, dead time, next arm
+      - renewal continues AFTER the verdict is returned; it stops on dwell expiry,
+        explicit open, safe state or disarm -- never on verdict
+      - a consent-channel (non-relay-gated) request sends NO relay command at all
+      - `lease_expired` while armed mid-dwell does NOT change the verdict
+      - `lease_expired` while unarmed touches no queued request
       - safe state resolves pending requests with verdict `link_lost`, NOT
         `denied` with a reason string (review finding I3)
       - the 2 s arming dead time holds and all buttons must be observed released
@@ -278,7 +293,7 @@ tickets:
       `uv run pytest tests/test_audit.py -v`
 
   - id: AIR-9
-    title: "Broker: blocking request/decide core"
+    title: "Broker: blocking approval core"
     tier: design
     depends_on: [AIR-6, AIR-7]
     reads: ["docs/spec/03-broker-api.md", "spikes/01-blocking-tool-call/FINDINGS.md"]
@@ -290,7 +305,8 @@ tickets:
 
       ## Scope
       - FastAPI app in `src/airgap/broker.py` with `/request_approval`,
-        `/decide/{id}`, `/pending`, `/health` per the contract.
+        `/pending`, `/health`, and the `ui`-scope read routes. **There is no
+        `/decide` endpoint** -- every verdict is produced in-process.
       - Requests park on an `asyncio.Event`. Exactly one armed at a time; others
         queue FIFO with their callers still blocked.
       - 30-minute configurable expiry resolving to `expired`, relay open.
@@ -299,14 +315,19 @@ tickets:
 
       ## Acceptance criteria
       - A request blocks until resolved, then returns the verdict.
-      - **`POST /decide` returns 403 for `decided_by=human` from every caller**,
-        with no exception path, no allowlist, no local-origin bypass. Test this
-        explicitly — it is finding C1 from design review 01 and it is the single
-        most important assertion in this ticket.
-      - No route reachable over HTTP can resolve a request as human-approved. The
-        only producer is the Supervisor, in-process, after Rule 4a.
-      - Broker binds 127.0.0.1, requires the startup bearer token, and rejects any
-        request carrying an `Origin` header.
+      - **There is NO `/decide` endpoint.** Enumerate every route the broker
+        exposes and assert none of them resolves a request, for ANY `decided_by`
+        value including `policy` and `system`. Review 01 made the endpoint reject
+        `human`; review 02 (I4) showed that was half a fix, because a co-resident
+        agent holding the MCP token could still post `decided_by=policy` and
+        unblock a consent-channel call. The endpoint is gone, not hardened. This
+        is the single most important assertion in this ticket.
+      - **Token scopes**: `agent` reaches only `POST /request_approval`; `ui`
+        reaches only reads and policy edits. Assert neither reaches the other's
+        routes.
+      - Broker binds 127.0.0.1. `/request_approval` rejects any request carrying
+        an `Origin` header; `ui` routes allowlist it instead, since the dashboard
+        is a browser and does send one.
       - Audit rows are written **before** callers are released and before the
         relay moves. Assert the ordering, not merely that both occurred.
       - Two concurrent requests: the second stays blocked while the first is
@@ -368,11 +389,15 @@ tickets:
 
       ## Acceptance criteria
       - Every cell of the resolution table has its own test.
-      - **Unmatched tool resolves to `escalate`.** An empty policy table sends
-        everything to a human; there is no configuration where an unmatched tool
-        is auto-approved (review finding I8).
-      - **A relay-gated tool with `auto_approve` still resolves to `escalate`**
-        (DESIGN.md D12).
+      - **Unmatched tool defaults the POLICY ACTION to `escalate`**, then the
+        resolution table applies. NOT "the verdict is escalate" -- a Warden
+        `block` on an unmatched tool must stay `block`, or you have widened a deny
+        and broken invariant 4 (review 02 finding I1). Test that cell explicitly.
+      - **A `relay_gated` row forces `auto_approve -> escalate` in the RESOLVER**,
+        before a verdict exists. Do not try to get this from the interlock: a
+        missing interlock branch stops the contact closing but leaves the verdict
+        `approved`, which means a lamp that reports success while staying dark
+        (review 02 finding I3, DESIGN.md D12).
       - Property test: for all inputs, `resolve()` never returns a verdict more
         permissive than the Warden's. Assert this as an invariant, not a case.
       - Turning the dial up never makes an outcome more permissive.
@@ -471,11 +496,15 @@ tickets:
       - **empty policy table**: every request escalates; nothing auto-approves
       - **relay-gated action with policy auto_approve still escalates** (D12) and
         the relay never closes without a press
-      - **`POST /decide` with `decided_by=human` is refused** and the request
-        stays pending — the software approve path must be closed end to end, not
-        just at the unit level
+      - **no HTTP route resolves a request**, for any `decided_by` value -- the
+        software approve path must be closed end to end, not just at unit level
       - **broker killed with the link up while the relay is closed**: the contact
         opens within 10 s via lease expiry and `lease_expired` is audited
+      - **relay-gated happy path**: approve -> close -> renew past 10 s -> dwell
+        expiry -> open -> disarm. The MCP caller is released at the verdict, not
+        at dwell end
+      - **empty policy table with a Warden `block`** still resolves `block`
+      - a `relay_gated` row set to `auto_approve` resolves `escalate`
       - device reset mid-request resolves `denied` / `device_reset`, never approved
       - link loss mid-request resolves to verdict `link_lost`, relay open
       - a button event with a mismatched `req` does not close the relay and the

@@ -54,7 +54,7 @@ with a Postgres rule/trigger in the migration, not just by convention.
 |---|---|---|
 | `seq` | `bigserial` PK | |
 | `at` | `timestamptz` | |
-| `event` | `text` | `request_created`, `warden_verdict`, `policy_override`, `armed`, `button`, `relay`, `resolved`, `safe_state` |
+| `event` | `text` | `request_created`, `warden_verdict`, `policy_override`, `armed`, `button`, `relay_closed`, `relay_opened`, `lease_expired`, `resolved`, `safe_state`. A successful relay-gated approve emits exactly: `request_created`, `warden_verdict`, `armed`, `button`, `resolved`, `relay_closed`, `relay_opened`. A consent-channel approve omits the last two |
 | `request_id` | `char(8)` NULL | |
 | `payload` | `jsonb` | |
 | `prev_hash` | `char(64)` | sha256 of the previous row's `row_hash`; genesis is 64 zeros |
@@ -74,18 +74,26 @@ that a future refactor cannot silently break the chain.
 | `tool_pattern` | `text` PK | glob, e.g. `db.drop_*` |
 | `min_dial` | `smallint` | escalate to human if dial ≥ this |
 | `action` | `text` | `auto_approve` / `escalate` / `block` |
+| `relay_gated` | `boolean` | default `false`. `true` means the action is enforcement-mode: the Supervisor runs a relay cycle, and the row can never resolve to `auto_approve` (see below) |
+| `dwell_s` | `smallint` | default `60`. Actuation window while the contact is closed. Ignored when `relay_gated` is false |
 | `updated_at` | `timestamptz` | |
 | `updated_by` | `text` | |
 
-**No matching row means `escalate`.** An empty `policies` table therefore sends
-every request to a human, which is the correct default and the shipped one
-(`DESIGN.md` §12 Q2). There is no configuration in which an unmatched tool is
-auto-approved.
+**No matching row means the policy action defaults to `escalate`** -- and then
+the resolution table below applies normally. Say it that way, not as "unmatched
+means the verdict is escalate": v1.1 said the latter, which would have turned a
+Warden `block` into an `escalate` on an unmatched tool, widening a deny and
+breaking invariant 4 (review 02 finding I1). An empty `policies` table therefore
+sends every *non-blocked* request to a human and still honours every Warden
+block, which is the shipped default (`DESIGN.md` §12 Q2).
 
-**Relay-gated tools are never auto-approved**, whatever their policy row says.
-The Supervisor's interlock has no auto-approve branch, so a row setting
-`auto_approve` on a relay-gated tool resolves to `escalate` rather than silently
-producing a request that can never actuate (`DESIGN.md` D12).
+**A `relay_gated` row can never resolve to `auto_approve`.** The resolver forces
+`auto_approve -> escalate` for these rows, as an explicit narrowing step. v1.1
+tried to infer this from "the interlock has no auto-approve branch", which does
+not follow: the missing branch stops the relay from closing, it does not change
+the verdict, so an auto-approved lamp would have returned `APPROVED` while the
+lamp stayed off (review 02 finding I3). The rule has to live in the resolver,
+which is why `relay_gated` is a column and not a convention.
 
 **Policy rows match `tool_name` only, never arguments.** A permissive row on a
 broad tool such as `db.execute_sql` auto-approves every possible call to it. Broad

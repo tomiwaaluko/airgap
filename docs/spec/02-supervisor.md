@@ -52,11 +52,21 @@ This is the safety-critical rule. Read it twice.
 
 `relay(closed=True)` is accepted **only** when all of the following hold:
 
-1. There is exactly one pending request, and the Supervisor is armed with its id.
+1. **The Supervisor is ARMED with request id R.** This is Supervisor state, not a
+   database query. The Supervisor stays ARMED across the request's resolution and
+   through the entire relay cycle, disarming only after the contact reopens. v1.1
+   worded this as "exactly one *pending* request", which deadlocked: Rule 4a
+   resolves the request before sending the close, so by the time the close is
+   sent nothing is pending and the condition could never pass (review 02 C1).
 2. A `btn` event with `which == "approve"` has been received.
-3. That event's `req` field **equals** the armed request id.
+3. That event's `req` field **equals** R.
 4. That event arrived **after** the `arm` command was acked.
 5. Fewer than 30 seconds have elapsed since that button event.
+
+Condition 5 gates only this initial `OPEN → CLOSED` transition, which the
+Supervisor issues immediately. Holding the contact closed afterwards uses
+`relay_renew`, which is **not** gated by Rule 4 — see Rule 4b. Renewal cannot
+create a closure, only extend one this rule already authorised.
 
 If any condition fails, the command is rejected and the failure is logged with
 which condition failed. `relay(closed=False)` is **always** accepted — opening is
@@ -75,19 +85,56 @@ A passing interlock does two things, in this order:
    the audit row **before** anything moves (invariant 5 / NF8).
 2. Then sends `relay(closed=True)` if the request is relay-gated.
 
-`decided_by="human"` has exactly one producer: this code path. The broker's
-`POST /decide` **must reject** that value from every caller regardless of origin,
-and no dashboard route may resolve a request. Without this, the five conditions
-gate only the relay — and for a consent-channel action the relay is irrelevant, so
-any local caller could produce `APPROVED`. See `DESIGN.md` D11.
+`decided_by="human"` has exactly one producer: this code path. **There is no HTTP
+endpoint that resolves a request at all** — `/decide` was removed entirely in
+v1.2, because the Warden, the resolver and the Supervisor all run in the broker's
+own process and no legitimate caller is remote (review 02 finding I4). Without
+this, the five conditions gate only the relay — and for a consent-channel action
+the relay is irrelevant, so any local caller could produce `APPROVED`. See
+`DESIGN.md` D11 and `spec/03`.
 
-### Rule 4b — lease renewal
+### Rule 4b — the relay cycle, start to finish
 
-While a relay is closed, re-send `relay(closed=True)` every **3000 ms** to renew
-the device-side 10 000 ms lease (spec/01). Stop renewing the moment the request
-resolves or the safe state is entered. A received `lease_expired` event means the
-host failed to renew: treat it as a fault, resolve any pending request as `denied`
-with reason `lease_expired`, and audit it.
+v1.1 left "when does a healthy approved relay reopen?" unspecified, which is
+review 02 finding C2. It is specified here.
+
+**Only requests whose policy row sets `relay_gated = true` have a relay cycle at
+all.** Consent-channel requests — the majority — resolve and return with no relay
+command ever sent. Do not send relay commands for them.
+
+For a relay-gated request, after Rule 4a has written the audit row:
+
+| Step | Action |
+|---|---|
+| 1 | Send `relay(closed=True)` — the one Rule-4-gated command |
+| 2 | Return `approved` to the blocked MCP caller **immediately**; do not wait for the cycle to finish |
+| 3 | Start renewing with `relay_renew` every **3000 ms** |
+| 4 | Start the **dwell timer**: `policies.dwell_s`, default **60 s** |
+| 5 | On dwell expiry, send `relay(closed=False)` and stop renewing |
+| 6 | Audit `relay_opened`, then **disarm** |
+| 7 | Observe `btns == 0` in a tick, then wait the 2 s dead time, then the next queued request may arm |
+
+Renewal **stops** on any of: dwell expiry, explicit open, safe state, or disarm.
+It does **not** stop on verdict — the verdict happens at step 2, well before the
+contact reopens. That was the v1.1 contradiction.
+
+The dwell is the actuation window: "you have 60 seconds to run the pump." There
+is no completion signal from the actor, deliberately — `DESIGN.md` D10 keeps the
+tool surface to one call — so a bounded window is the honest mechanism.
+
+### Rule 4c — `lease_expired` is scoped to the armed request
+
+A `lease_expired` event means the host failed to renew a contact it intended to
+hold. Handling depends on state, and **it may never touch a request other than
+the armed one**:
+
+- **ARMED with R, mid-dwell:** fault. Audit `lease_expired`, mark R's cycle
+  incomplete, stop renewing, disarm. R's verdict is already `approved` and does
+  not change — the human did approve; the actuation window was cut short. The
+  actor is not re-notified; `DESIGN.md` D10 gives it no channel.
+- **Not armed, or dwell already complete:** a stray. Audit it, confirm the
+  contact is open, and change nothing. It must not resolve, deny, or disturb any
+  queued request.
 
 ## Rule 5 — fail-safe
 

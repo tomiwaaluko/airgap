@@ -42,39 +42,55 @@ Internal only. Not exposed to the network. The MCP server is the public face.
   "latency_ms": 41904 }
 ```
 
-Blocks. No server-side timeout by default; see *Timeouts* below.
+Blocks. No server-side timeout by default; see *Timeouts* below. Returns as soon
+as the verdict exists -- for a relay-gated request that is before the dwell
+window closes, not after (`spec/02` Rule 4b step 2).
 
-### `POST /decide/{request_id}` — system and policy verdicts **only**
+### There is no `/decide` endpoint
 
-```jsonc
-{ "approved": false, "decided_by": "policy", "reason": "blocked by policy db.drop_*" }
-```
+v1.1 kept `POST /decide` for policy and system verdicts after removing the human
+one. Review 02 finding I4 showed that is still a hole: the Warden, the policy
+engine and the Supervisor all run **in the broker's own process**, so no
+legitimate caller is remote. Anything reaching `/decide` over HTTP is by
+definition not one of them, and a co-resident agent holding the MCP token could
+have posted `decided_by=policy` to unblock a consent-channel call with no button
+press and no policy evaluation.
 
-`decided_by` accepts exactly `policy`, `warden_auto`, or `system`. It **must
-reject `human` with `403` from every caller**, without exception and regardless
-of origin, source address, or credential.
+**Every verdict is produced in-process.** There is no HTTP surface that resolves
+a request, for any `decided_by` value. Removing the endpoint removes the class.
 
-**This is a security boundary, not a validation nicety.** The human verdict is
-produced in-process by the Supervisor after the Rule 4 interlock (`spec/02` Rule
-4a) and never travels over HTTP. If `/decide` could mint `decided_by=human`, then
-for consent-channel actions — which is most of them — the five-condition
-interlock would gate nothing that matters, and any co-resident process, or a page
-issuing a simple cross-origin POST to localhost, could produce `APPROVED`. See
-`DESIGN.md` D11 and C1 in `docs/reviews/2026-08-23-design-review.md`.
+| Verdict | Produced by | Path |
+|---|---|---|
+| `human` | Supervisor, after Rule 4a | in-process |
+| `policy` / `warden_auto` | Policy engine, after resolution | in-process |
+| `system` (`expired`, `link_lost`, `device_reset`) | Broker timers and the Supervisor's safe state | in-process |
 
-Returns `404` if the request is not pending, `409` if already resolved, `403` for
-`decided_by=human`.
+### Token scopes
 
-Additional hardening, all required:
+One unscoped token was wrong: the MCP server and the dashboard are separate
+processes with different needs (I4).
+
+| Scope | Held by | May call |
+|---|---|---|
+| `agent` | MCP server | `POST /request_approval` only |
+| `ui` | Dashboard backend | `GET /pending`, `/audit`, `/policies`, and `PUT /policies/{pattern}` |
+
+Both are generated at broker startup and held in memory. The `agent` token grants
+nothing that can resolve a request; the `ui` token grants nothing that can
+approve one. Neither scope can reach the other's routes.
+
+Hardening:
 
 - Bind `127.0.0.1` only. Never `0.0.0.0`.
-- Require a bearer token generated at broker startup, held in memory, never
-  written to disk or logs.
-- Require `Content-Type: application/json` and reject requests carrying
-  `Origin`, which no legitimate local caller sends. Together these defeat the
-  simple-request cross-origin path.
-- The **dashboard has no approve capability**: no route, no button, no token
-  scope that can resolve a request.
+- `POST /request_approval` requires `Content-Type: application/json` and rejects
+  any request carrying an `Origin` header — no legitimate agent sends one, and it
+  closes the simple-cross-origin path.
+- The dashboard is a browser and **does** send `Origin`, so `ui`-scope routes
+  check it against an allowlist instead of rejecting it, and `PUT /policies`
+  additionally requires a double-submit CSRF token. v1.1's blanket `Origin`
+  rejection would have broken the dashboard (I4).
+- The dashboard has **no approve capability**: no route, no button, no token
+  scope, and nothing in `ui` scope that resolves a request.
 
 ### `GET /pending`
 
@@ -117,12 +133,15 @@ agent to call this *before* acting rather than after. Do not shorten it.
 | MCP client | none (SDK default) | verified to survive the spike duration |
 | Broker `/request_approval` | none | the physical gate has no timeout either |
 | Request expiry | **30 minutes**, configurable | resolves to verdict `expired` — not `denied` — relay stays open |
-| Relay lease renewal | 3 s while closed, device expires at 10 s | bounds an unsupervised closed contact after a broker kill |
+| Relay lease renewal | `relay_renew` every 3 s, device expires at 10 s | bounds an unsupervised closed contact after a broker kill |
+| Relay dwell window | `policies.dwell_s`, default 60 s | the actuation window; there is no completion signal from the actor |
+| Arming dead time | 2 s, plus `btns == 0` observed | stops a press binding to a request the human never read |
 | Inbound request rate | 6/min per `tool_name` per actor | an agent retry loop must not be able to flood the queue |
 | Ack timeout, device | 100 ms | see [`01-serial-protocol.md`](01-serial-protocol.md) |
 | Link loss | 3000 ms without a tick | safe state, all pending → `link_lost` |
 
-Expiry is the only time bound, and it fails closed.
+Every one of these bounds fails toward open. Expiry is the only one that resolves
+a *request*; the lease, dwell and dead time bound the relay cycle instead.
 
 ## Concurrency
 
@@ -137,6 +156,7 @@ arm two requests concurrently — the interlock in
 
 ## Startup and recovery
 
-On broker start: open the serial link, `disarm`, drive the relay open, mark any
-`requests` rows still `pending` in the database as `link_lost`. A broker restart
+On broker start: open the serial link, `disarm`, drive the relay open
+(`relay(closed=false)` is ungated and always accepted), mark any `requests` rows
+still `pending` in the database as `link_lost`. A broker restart
 never inherits a pending approval.
