@@ -147,11 +147,16 @@ yours doesn't, you must not need hardware.
   line is expected, not exceptional. `Supervisor.send()` raises, because being
   asked to send a forbidden command is a programming error.
 - **No new dependencies** without saying so in the ticket comment. The stack is
-  fastapi, uvicorn, pydantic, sqlalchemy, alembic, httpx, pyserial, mcp,
-  anthropic, rich, pytest, hypothesis, freezegun, ruff, mypy, hatchling. That
-  should be enough. All of it goes into `pyproject.toml` at AIR-1 — a later
-  ticket that needs one of these is not adding a dependency, it is using one
-  already declared, and does not need a comment.
+  fastapi, uvicorn, pydantic, sqlalchemy, alembic, pg8000, httpx,
+  pyserial, mcp, anthropic, rich, pytest, hypothesis, freezegun, ruff, mypy,
+  hatchling. That should be enough. All of it goes into `pyproject.toml` at
+  AIR-1 — a later ticket that needs one of these is not adding a dependency, it
+  is using one already declared, and does not need a comment.
+
+  `pg8000` is the approved PostgreSQL DBAPI. It is pure Python, so it works under
+  the Windows application-control policy as well as in CI. SQLAlchemy URLs must
+  select it explicitly with `postgresql+pg8000://`; bare `postgresql://` selects
+  the absent legacy psycopg2 dialect instead.
 
   `hypothesis` is required by the property tests in AIR-2 and AIR-11, `freezegun`
   by §6's no-`sleep()` rule, and `rich` by the terminal reader. They are listed

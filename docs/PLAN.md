@@ -345,7 +345,7 @@ narrative runs without intervention.
 | **Layering** | Only `supervisor.py` imports `transport.py`; `protocol.py` and `policy.py` import nothing internal **except `airgap.vocab`**, which imports nothing internal at all | AIR-1, CI |
 | **Plan/ticket agreement** | §5's two tables match `tickets.yaml` edge for edge and wave for wave | `validate_plan.py`, CI |
 | **Unit** | Every module has a peer test file | Each ticket |
-| **Property** | Codec round-trip (`hypothesis`); policy never widens, asserted as an invariant over generated inputs | AIR-2, AIR-11 |
+| **Property** | Command encoding preserves normalized wire fields (`hypothesis`); device-frame decoding preserves Ack/Event fields and rejects command-shaped input; policy never widens over generated inputs | AIR-2, AIR-11 |
 | **Adversarial** | A second, independent session tries to defeat the protection | AIR-6, 8, 11, 17 |
 | **Integration** | Full chain on `MockTransport` + stubbed LLM | AIR-14 |
 | **Hardware** | Bring-up checklist | AIR-5, human, once |
