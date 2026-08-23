@@ -49,8 +49,29 @@ timer contention at all.
 5. Emit `{"ev":"boot","fw":"1.0.0","t":<millis>}`.
 6. Enter `DISARMED`.
 
-The device always comes up refusing. A power cycle mid-demo is a denial, not an
-approval.
+The device always comes up refusing. **A power cycle mid-request is a denial, not
+an approval** — on receiving `boot` the host resolves any pending request with
+`verdict="denied"`, reason `device_reset`, and does not silently re-arm. The flag
+comes up **up** (blocked) and stays there until the host disarms.
+
+## The relay lease
+
+The one thing the device decides on its own. It is a timeout, not a judgment, so
+it does not conflict with "the device never drives its own relay" — the host
+still decides to *close*; the device only enforces a deadline on how long a close
+survives without contact.
+
+- `relay(closed=true)` closes the contact and starts or renews a **10 000 ms**
+  lease.
+- If the lease expires, the device opens the contact itself and emits
+  `{"ev":"lease_expired","t":...}`.
+- `relay(closed=false)` opens immediately and cancels the lease.
+- `tick` reports `lease_ms` remaining, `0` when open.
+
+This exists because passive fail-safe only covers power loss. If the broker is
+killed while the host stays powered, USB power remains, the sketch keeps looping,
+and without a lease the contact would stay closed indefinitely with nothing
+supervising it (`DESIGN.md` D8, F2).
 
 ## State machine
 
@@ -91,4 +112,8 @@ Do these in order on real hardware before trusting any of it:
 5. Relay clicks on `relay(closed=true)` and the load actually switches.
 6. **Unplug the USB cable while the relay is closed.** The relay must open.
    If it does not, the wiring is inverted and everything downstream is unsafe.
-7. `tone()` sounds while the LED is red — confirm no visible LED glitch.
+7. **Kill the host process with USB still connected, relay closed.** The contact
+   must open within 10 s and a `lease_expired` event must have been emitted.
+   This is a different failure from item 6 and a different mechanism; passing one
+   says nothing about the other.
+8. `tone()` sounds while the LED is red — confirm no visible LED glitch.

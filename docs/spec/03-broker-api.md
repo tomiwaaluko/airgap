@@ -44,16 +44,37 @@ Internal only. Not exposed to the network. The MCP server is the public face.
 
 Blocks. No server-side timeout by default; see *Timeouts* below.
 
-### `POST /decide/{request_id}`
-
-Called by the serial bridge when a verified button event arrives, or by the
-policy engine for an automatic verdict. Never called by an LLM.
+### `POST /decide/{request_id}` — system and policy verdicts **only**
 
 ```jsonc
-{ "approved": true, "decided_by": "human", "reason": "pressed APPROVE" }
+{ "approved": false, "decided_by": "policy", "reason": "blocked by policy db.drop_*" }
 ```
 
-Returns `404` if the request is not pending, `409` if it is already resolved.
+`decided_by` accepts exactly `policy`, `warden_auto`, or `system`. It **must
+reject `human` with `403` from every caller**, without exception and regardless
+of origin, source address, or credential.
+
+**This is a security boundary, not a validation nicety.** The human verdict is
+produced in-process by the Supervisor after the Rule 4 interlock (`spec/02` Rule
+4a) and never travels over HTTP. If `/decide` could mint `decided_by=human`, then
+for consent-channel actions — which is most of them — the five-condition
+interlock would gate nothing that matters, and any co-resident process, or a page
+issuing a simple cross-origin POST to localhost, could produce `APPROVED`. See
+`DESIGN.md` D11 and C1 in `docs/reviews/2026-08-23-design-review.md`.
+
+Returns `404` if the request is not pending, `409` if already resolved, `403` for
+`decided_by=human`.
+
+Additional hardening, all required:
+
+- Bind `127.0.0.1` only. Never `0.0.0.0`.
+- Require a bearer token generated at broker startup, held in memory, never
+  written to disk or logs.
+- Require `Content-Type: application/json` and reject requests carrying
+  `Origin`, which no legitimate local caller sends. Together these defeat the
+  simple-request cross-origin path.
+- The **dashboard has no approve capability**: no route, no button, no token
+  scope that can resolve a request.
 
 ### `GET /pending`
 
@@ -95,7 +116,9 @@ agent to call this *before* acting rather than after. Do not shorten it.
 |---|---|---|
 | MCP client | none (SDK default) | verified to survive the spike duration |
 | Broker `/request_approval` | none | the physical gate has no timeout either |
-| Request expiry | **30 minutes**, configurable | resolves to `expired`, relay stays open |
+| Request expiry | **30 minutes**, configurable | resolves to verdict `expired` — not `denied` — relay stays open |
+| Relay lease renewal | 3 s while closed, device expires at 10 s | bounds an unsupervised closed contact after a broker kill |
+| Inbound request rate | 6/min per `tool_name` per actor | an agent retry loop must not be able to flood the queue |
 | Ack timeout, device | 100 ms | see [`01-serial-protocol.md`](01-serial-protocol.md) |
 | Link loss | 3000 ms without a tick | safe state, all pending → `link_lost` |
 

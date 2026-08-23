@@ -62,6 +62,33 @@ If any condition fails, the command is rejected and the failure is logged with
 which condition failed. `relay(closed=False)` is **always** accepted — opening is
 never gated.
 
+There is deliberately **no auto-approve branch**. An auto-approved request never
+produces a button event, so it can never satisfy condition 2 and can never close
+the relay. That is the mechanism behind `DESIGN.md` D12, and it is why the rule is
+written in terms of button events rather than verdicts.
+
+### Rule 4a — the interlock is what mints `decided_by=human`
+
+A passing interlock does two things, in this order:
+
+1. Resolves the pending request **in-process** with `decided_by="human"`, writing
+   the audit row **before** anything moves (invariant 5 / NF8).
+2. Then sends `relay(closed=True)` if the request is relay-gated.
+
+`decided_by="human"` has exactly one producer: this code path. The broker's
+`POST /decide` **must reject** that value from every caller regardless of origin,
+and no dashboard route may resolve a request. Without this, the five conditions
+gate only the relay — and for a consent-channel action the relay is irrelevant, so
+any local caller could produce `APPROVED`. See `DESIGN.md` D11.
+
+### Rule 4b — lease renewal
+
+While a relay is closed, re-send `relay(closed=True)` every **3000 ms** to renew
+the device-side 10 000 ms lease (spec/01). Stop renewing the moment the request
+resolves or the safe state is entered. A received `lease_expired` event means the
+host failed to renew: treat it as a fault, resolve any pending request as `denied`
+with reason `lease_expired`, and audit it.
+
 ## Rule 5 — fail-safe
 
 Any of the following triggers an immediate transition to the **safe state**:
@@ -72,10 +99,16 @@ Any of the following triggers an immediate transition to the **safe state**:
 - An ack timeout on a `relay` command
 - Unhandled exception anywhere in the broker process
 
-**Safe state** is: relay open, LED red, flag up, all pending requests resolved as
-`denied` with reason `link_lost`. The relay is opened by de-energising, so a
-dead host or unplugged USB cable produces the safe state passively — verify this
-on real hardware during bring-up (`AIR-5`).
+**Safe state** is: relay open, LED red, flag up, lease renewal stopped, and all
+pending requests resolved with **`verdict="link_lost"`** — a first-class verdict
+value in `spec/05`, *not* `denied` with a reason string. The audit row is written
+before any caller is released.
+
+The relay opens passively when the device loses power (unplugged cable, host
+powered down), and via the device-side lease within 10 s when the host process
+dies with USB still powered. Those are two different mechanisms covering two
+different failures; see `DESIGN.md` D8. Verify both on real hardware during
+bring-up (`AIR-5`).
 
 ## Rule 6 — no judgment
 
@@ -107,3 +140,13 @@ class Supervisor:
 - a replayed `btn` event (same one delivered twice) closes the relay at most once
 - tick starvation for 3001 ms enters the safe state
 - `relay(closed=False)` succeeds in every state including the safe state
+- an auto-approved request never closes the relay, however policy is configured
+- a passing interlock writes the audit row **before** sending `relay(closed=True)`
+  — assert the ordering, not just that both happened
+- the lease is renewed at 3 s intervals while closed, and renewal **stops**
+  immediately on resolution or safe state
+- a `lease_expired` event resolves any pending request as `denied` /
+  `lease_expired` and is audited
+- the 2 s arming dead time holds: a second button press within it binds to
+  nothing, and the next request does not arm until all buttons are observed
+  released (`DESIGN.md` D5)

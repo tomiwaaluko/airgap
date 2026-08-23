@@ -36,6 +36,13 @@ The device **must** ack every command within 100 ms.
 Field rules:
 
 - `cmd` — one of exactly: `ping`, `led`, `tone`, `flag`, `relay`, `lcd`, `arm`, `disarm`. Unknown → error ack.
+- `relay.closed` — **closing is a lease, not a latch.** Each `{"cmd":"relay","closed":true}`
+  renews a 10 000 ms lease. If the device does not receive a renewal before the
+  lease expires it opens the contact on its own and emits
+  `{"ev":"lease_expired","t":...}`. The host renews every 3000 ms while it intends
+  the contact to stay closed. `{"cmd":"relay","closed":false}` opens immediately
+  and cancels the lease. This is the *only* thing the device decides autonomously,
+  and it is a timeout rather than a judgment — see `DESIGN.md` D8.
 - `led.state` — one of `off`, `green`, `amber`, `red`. Amber is red+green both on.
 - `tone.pattern` — one of `ok`, `deny`, `alert`. `n` clamps to 1..5.
 - `lcd.l1` / `lcd.l2` — truncated to 16 chars by the **host**, not the device.
@@ -58,7 +65,12 @@ Field rules:
 ```json
 {"ev":"btn","which":"approve","req":"a91f3c2e","t":91043}
 {"ev":"boot","fw":"1.0.0","t":12}
+{"ev":"lease_expired","t":104220}
 ```
+
+- `ev.lease_expired` — the device opened the relay itself because the host stopped
+  renewing. The host must treat this as a link/health fault, resolve any pending
+  request as `denied` with reason `lease_expired`, and audit it.
 
 - `ev.btn.which` — `approve` | `deny` | `never`.
 - `ev.btn.req` — the request id from the last `arm`. If the device is not armed
@@ -69,8 +81,11 @@ Field rules:
 ### Telemetry — every 1000 ms, unconditionally
 
 ```json
-{"ev":"tick","dial":7,"relay":false,"armed":true,"t":92044}
+{"ev":"tick","dial":7,"relay":false,"armed":true,"lease_ms":0,"t":92044}
 ```
+
+- `lease_ms` — milliseconds remaining on the relay lease, `0` when the contact is
+  open. Lets the host detect a lease it is failing to renew before it expires.
 
 - `dial` — autonomy level, integer 0..10, mapped from `A0` by the **firmware**.
 - Absence of ticks for **3000 ms** is a link failure. See fail-safe in

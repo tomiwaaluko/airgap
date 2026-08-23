@@ -18,8 +18,18 @@ preventing the action. The call does not return until a human presses a button
 on that device. Then the relay closes and the agent proceeds — or it doesn't, and
 the agent is told no.
 
-The point is that the block is enforced by **geometry**, not by an `if` statement
-that a prompt injection could argue its way past.
+**Be precise about what that buys**, because an imprecise version of this
+sentence will lead you to write code that overclaims. Airgap has two modes:
+
+- **Consent channel** — most actions. The guarantee is that the agent *asked* and
+  a human had a real out-of-band veto. The action is **not** impossible; an agent
+  with credentials can reach the resource another way.
+- **Enforcement boundary** — only when the relay is physically in the controlled
+  thing's power path. Then it genuinely is impossible while the contact is open.
+
+Neither survives compromise of the host. Read `docs/DESIGN.md` §4.3 and §4.4
+before writing a comment, docstring, or README line that says "prevented by
+geometry" — that phrase is true of the enforcement mode only.
 
 A second LLM, the **Warden**, triages each request first and may auto-approve
 low-risk ones. A deterministic **policy engine** runs after the Warden and can
@@ -47,6 +57,16 @@ comments instead of implementing it.**
    `docs/spec/02-supervisor.md`.
 7. **Only `src/airgap/supervisor.py` may import `src/airgap/transport.py`.**
    There is a test that enforces this by scanning the source tree.
+8. **`decided_by="human"` has exactly one producer: the Supervisor, in-process,
+   after the Rule 4 interlock passes.** `POST /decide` rejects that value with
+   `403` from every caller. The dashboard has no approve route, no approve button,
+   and no token scope that can resolve a request. If you find yourself adding a
+   way for software to say a human approved something, you have just removed the
+   entire point of the project.
+9. **A closed relay is a lease, renewed every 3 s and expiring at 10 s.** Killing
+   the broker must not leave the contact closed.
+10. **Auto-approval can never close the relay.** The interlock has no
+    auto-approve branch, so relay-gated actions always escalate.
 
 ---
 
@@ -195,3 +215,13 @@ reasoning effort; it also tells you how much care to take.
 - **Only one request can be armed at a time.** There is one flag and one set of
   buttons; a human cannot indicate *which* of two requests they approved.
 - **`decode()` swallowing bad frames is correct.** Serial lines produce garbage.
+- **The relay lease looks like the device making a decision.** It isn't — it is a
+  deadline. Passive fail-safe only covers power loss; a killed broker with USB
+  still powered would otherwise leave the contact closed forever.
+- **Auto-approved requests light nothing up.** No LED, no flag, no tone — LCD
+  only. Green means "a human just approved this" and nothing else, because with
+  FIFO queuing a green flash could appear while a *different* request sits armed.
+- **`POST /decide` refusing `decided_by=human` is not an oversight to fix.** See
+  invariant 8.
+- **`expired` and `link_lost` are verdicts, not reasons.** A timeout is not a
+  denial and the audit trail must be able to tell them apart.

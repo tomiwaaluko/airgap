@@ -18,8 +18,8 @@ The record of something an agent wanted to do.
 | `tool_args` | `jsonb` | verbatim arguments |
 | `justification` | `text` | the actor's stated reason |
 | `risk_class` | `text` | `low` / `medium` / `high` / `blocked` |
-| `verdict` | `text` NULL | `approved` / `denied` / `expired` / `link_lost` |
-| `decided_by` | `text` NULL | `human` / `policy` / `warden_auto` / `system` |
+| `verdict` | `text` NULL | `approved` / `denied` / `expired` / `link_lost`. These are peers: a timeout is `expired`, a dropped link is `link_lost`, neither is `denied` with a reason string |
+| `decided_by` | `text` NULL | `human` / `policy` / `warden_auto` / `system`. **`human` is written only by the Supervisor after the Rule 4 interlock** (`spec/02` 4a); the HTTP layer rejects it |
 | `reason` | `text` NULL | human-readable |
 | `dial_at_decision` | `smallint` NULL | autonomy level when decided |
 | `latency_ms` | `integer` NULL | created_at → resolved_at |
@@ -77,7 +77,22 @@ that a future refactor cannot silently break the chain.
 | `updated_at` | `timestamptz` | |
 | `updated_by` | `text` | |
 
-Policy rows are evaluated **after** the Warden and can only narrow its verdict.
+**No matching row means `escalate`.** An empty `policies` table therefore sends
+every request to a human, which is the correct default and the shipped one
+(`DESIGN.md` §12 Q2). There is no configuration in which an unmatched tool is
+auto-approved.
+
+**Relay-gated tools are never auto-approved**, whatever their policy row says.
+The Supervisor's interlock has no auto-approve branch, so a row setting
+`auto_approve` on a relay-gated tool resolves to `escalate` rather than silently
+producing a request that can never actuate (`DESIGN.md` D12).
+
+**Policy rows match `tool_name` only, never arguments.** A permissive row on a
+broad tool such as `db.execute_sql` auto-approves every possible call to it. Broad
+tools must not be given `auto_approve`; this is a convention in v1, not an
+enforced constraint, and is tracked as `DESIGN.md` §12 R8.
+
+Policy rows are evaluated **after** the Warden and can only narrow its proposal.
 The resolution table:
 
 | Warden says | Policy says | Result |

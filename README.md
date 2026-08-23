@@ -7,8 +7,8 @@ call **blocks**. On the desk, an Arduino raises a servo-driven flag, turns an LE
 red, beeps, and holds a relay contact open. The call does not return until a
 human presses a physical button.
 
-The block is enforced by geometry, not by an `if` statement that a prompt
-injection can argue its way past.
+The approval **input** is out-of-band: a physical button with no software path by
+which an agent can press it. What that buys depends on the mode — see below.
 
 > **Status:** design complete, implementation not started.
 > Contracts are frozen; work is tracked in [`docs/tickets/tickets.yaml`](docs/tickets/tickets.yaml).
@@ -20,10 +20,10 @@ injection can argue its way past.
 Read this before assuming anything. Airgap operates in two modes, and conflating
 them would be dishonest:
 
-| Mode | When | Guarantee |
-|---|---|---|
-| **Enforcement boundary** | The relay is physically in the power path of the controlled thing — a lamp, pump, motor, machine mains | **Strong.** Physically impossible while the relay is open |
-| **Consent channel** | The action is purely digital and reachable another way — `DROP TABLE`, `send_email`, an API call | **Moderate.** Guarantees the agent *asked*, and gives a human a real out-of-band veto. Does **not** make the action impossible |
+| Mode | When | Guarantee | Survives host compromise? |
+|---|---|---|---|
+| **Enforcement boundary** | The relay is physically in the power path of the controlled thing — a lamp, pump, motor, machine mains | **Strong.** Physically impossible while the relay is open | **No** |
+| **Consent channel** | The action is purely digital and reachable another way — `DROP TABLE`, `send_email`, an API call | **Moderate.** Guarantees the agent *asked*, and gives a human a real out-of-band veto. Does **not** make the action impossible | No |
 
 Most software actions are consent channel.
 
@@ -33,11 +33,18 @@ It does not confine an agent. Specifically, it does **not** defend against:
 
 - **An agent that never calls `request_approval`.** Airgap gates what is routed
   through it. Pair it with least-privilege credentials.
-- **A compromised host.** The device renders what the broker tells it to. If the
-  broker is owned, the LCD can lie about what you are approving.
+- **A compromised host.** The broker, Supervisor, database and dashboard share one
+  trust zone and fail as a unit. A compromised host can render a false action on
+  the LCD, synthesise button frames, rewrite the policy table, and recompute the
+  audit chain. Every guarantee above is void. This is the dominant residual risk.
 - **A malicious or coerced human**, or anyone else within reach of the button.
+- **An auto-approved action**, which by definition no human ever sees. Ships
+  disabled, with an empty policy envelope.
 - **Malicious firmware.** Flash it yourself from `firmware/`.
 - **A relay that fails welded shut.** Not detectable in software.
+- **Audit tampering by a database superuser.** The hash chain is unkeyed and
+  unanchored, so a superuser can rewrite history and recompute it. Tamper-evident
+  below superuser, not tamper-proof.
 
 The full analysis, including the threats it *does* defend against, is in
 [`docs/DESIGN.md` §4](docs/DESIGN.md).
