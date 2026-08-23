@@ -13,6 +13,7 @@ dependencies = [
   "pydantic",
   "sqlalchemy",
   "alembic",
+  "pg8000",
   "httpx",
   "pyserial",
   "mcp",

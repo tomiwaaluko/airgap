@@ -1,4 +1,9 @@
-# Serial Protocol — FROZEN CONTRACT v1.1
+# Serial Protocol — FROZEN CONTRACT v1.2
+
+> **v1.2 (2026-08-23), AIR-2 dispatch blocker.** The reference property used
+> the device-to-host `decode()` function to decode a host-to-device command,
+> contradicting both its return type and the protocol's directional boundary.
+> Command encoding and device-frame decoding now have separate properties.
 
 > **v1.1 (2026-08-23), plan review 02 C1 and I7.** Two defects, both of the same
 > kind: `ev.lease_expired` still described the v1.1 host behaviour that `spec/02`
@@ -164,8 +169,15 @@ held-through case, which dead time alone does not close.
 
 ```python
 encode(cmd: Command) -> bytes          # ends in b"\n", <= 200 bytes, raises FrameTooLong
-decode(line: bytes) -> Ack | Event | None   # None on unparseable, never raises
+decode(line: bytes) -> Ack | Event | None   # device → host only; never raises
 ```
 
-Round-trip property that must hold in tests:
-`decode(encode(c))` preserves every field of `c` for all valid `c`.
+Properties that must hold in tests:
+
+- For every valid `Command c`, parsing the ASCII JSON in `encode(c)` (before its
+  trailing LF) preserves every wire field after the host-side normalization
+  specified above, including LCD truncation.
+- Every valid `Ack` and `Event` fixture passed to `decode()` preserves every
+  field.
+- A command-shaped line passed to `decode()` returns `None`. Accepting a command
+  on the device-to-host path would erase the protocol's directional boundary.

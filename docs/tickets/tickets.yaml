@@ -95,9 +95,10 @@ tickets:
       - Monotonic id allocator that wraps 65535 -> 1.
 
       ## Acceptance criteria
-      - Every command and event shape in the spec round-trips.
-      - Property test: `decode(encode(c))` preserves all fields, for generated
-        valid `c` (use `hypothesis`).
+      - Property test: for generated valid commands, parsing the ASCII JSON from
+        `encode(c)` preserves every normalized wire field (use `hypothesis`).
+      - Every Ack and Event shape in the spec decodes with all fields preserved.
+      - Command-shaped input to the device-to-host `decode()` returns `None`.
       - Fuzz test: `decode()` returns `None` and does not raise for 1000 random
         byte strings including truncated JSON, embedded nulls, and non-UTF-8.
       - `lcd` truncation to 16 chars happens here, host-side, per the spec.
