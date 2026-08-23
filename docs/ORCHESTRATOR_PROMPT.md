@@ -50,8 +50,23 @@ output** — the wave schedule you dispatch from is the one it prints.
 
 ## Step 1 — Reconcile Linear against `tickets.yaml`
 
-**The 18 Linear issues already exist.** They were created from `tickets.yaml`
-before this session started; you are not creating them.
+**The 18 Linear issues already exist** in workspace `airgap-hardware`, team
+**Airgap**. They were created from `tickets.yaml` before this session started;
+you are not creating them.
+
+> ### ⚠️ Linear's numbering is offset by four. Add 4.
+>
+> Linear's `AIR-1`..`AIR-4` are its own onboarding issues, created before this
+> project and impossible to renumber. So **canonical `AIR-n` is Linear
+> `AIR-(n+4)`**: `AIR-1` → `AIR-5`, `AIR-17` → `AIR-21`, `AIR-18` → `AIR-22`.
+>
+> Every issue title is prefixed with its canonical id (`AIR-17 — Relay
+> interlock…`) and every description states its own mapping, so you never have
+> to infer the canonical id from a URL. **Read the title, not the number.**
+>
+> When you speak to me, to a session, or in a PR, use the **canonical** id.
+> Ids in `tickets.yaml`, `PLAN.md`, the specs and the reviews are all canonical.
+> The four onboarding issues are not project work — ignore them.
 
 Your job is to confirm Linear still matches the file, because the file is the
 source of truth and Linear is the mirror. For each entry in `tickets.yaml`, check

@@ -225,12 +225,15 @@ Stop, comment on the ticket, and do not code around it if:
 Your ticket carries a `tier`. The orchestrator uses it to pick your model and
 reasoning effort; it also tells you how much care to take.
 
-| Tier | Means | Expectation |
-|---|---|---|
-| `mechanical` | scaffolding, config, boilerplate | Follow the pattern. Don't invent. |
-| `standard` | normal implementation against a frozen contract | Match the spec exactly. Normal test coverage. |
-| `design` | contract exists, implementation shape is open | Think about structure. Explain your choice in the PR. |
-| `safety-critical` | the interlock, the audit chain, the policy resolver | Enumerate failure modes first, then implement. Adversarially review your own work before opening the PR: try to find the input that defeats it. |
+| Tier | Codex 5.6 | Effort | Means | Expectation |
+|---|---|---|---|---|
+| `mechanical` | Luna | `low` | scaffolding, config, boilerplate | Follow the pattern. Don't invent. |
+| `standard` | Terra | `medium` | normal implementation against a frozen contract | Match the spec exactly. Normal test coverage. |
+| `design` | Sol | `high` | contract exists, implementation shape is open | Think about structure. Explain your choice in the PR. |
+| `safety-critical` | Sol | `xhigh` | the interlock, the audit chain, the policy resolver | Enumerate failure modes first, then implement. Adversarially review your own work before opening the PR: try to find the input that defeats it. |
+
+If you are running at a different model or effort than your tier's row, someone
+dispatched you wrong. Say so before you start — `PLAN.md` §9 is authoritative.
 
 ---
 

@@ -361,12 +361,23 @@ happy-path test would have sailed past.
 
 ## 9. Dispatch model
 
-| Tier | Tickets | Model / effort | Extra |
-|---|---|---|---|
-| `mechanical` | AIR-1, 15 | smallest capable, low | — |
-| `standard` | AIR-2, 3, 5, 7, 10, 13, 18 | mid, medium | — |
-| `design` | AIR-4, 9, 12, 14, 16 | strongest, high | PR explains the structural choice |
-| `safety-critical` | AIR-6, 8, 11, 17 | strongest, maximum | **Second independent adversarial session** |
+**Implementation runs on Codex 5.6.** The tier determines the model and the
+effort mode; nothing is chosen per ticket. This table is the only place the
+mapping is written down — a ticket's Linear description renders it from here, so
+the two cannot disagree.
+
+| Tier | Tickets | Codex model | Effort | Extra |
+|---|---|---|---|---|
+| `mechanical` | AIR-1, 15 | **5.6 Luna** | `low` | — |
+| `standard` | AIR-2, 3, 5, 7, 10, 13, 18 | **5.6 Terra** | `medium` | — |
+| `design` | AIR-4, 9, 12, 14, 16 | **5.6 Sol** | `high` | PR explains the structural choice |
+| `safety-critical` | AIR-6, 8, 11, 17 | **5.6 Sol** | `xhigh` | **Second independent adversarial session, also Sol / `xhigh`** |
+
+Two notes on the mapping. **The adversarial pass is never cheaper than the
+implementation it attacks** — an attacker weaker than the builder finds nothing
+and produces false assurance, which is worse than skipping the pass honestly.
+And **AIR-5 carries `standard` but is `human: true`**; the tier is vestigial
+there and no model is ever assigned. Never dispatch it.
 
 **Session budget:** 17 agent tickets + 4 adversarial = 21 base, + ~25% rework ≈
 **26 sessions**. AIR-5 is human and consumes none. Peak concurrency is 3, set by

@@ -33,6 +33,15 @@ TICKETS = ROOT / "docs" / "tickets" / "tickets.yaml"
 PLAN = ROOT / "docs" / "PLAN.md"
 
 TIERS = {"mechanical", "standard", "design", "safety-critical"}
+
+# Tier -> (Codex 5.6 model, effort). PLAN.md section 9 is the human-readable
+# copy and is checked against this dict, so the two cannot drift apart.
+TIER_DISPATCH = {
+    "mechanical": ("Luna", "low"),
+    "standard": ("Terra", "medium"),
+    "design": ("Sol", "high"),
+    "safety-critical": ("Sol", "xhigh"),
+}
 REQUIRED_SECTIONS = ("## Context", "## Scope", "## Acceptance criteria", "## Verification")
 
 problems: list[str] = []
@@ -209,6 +218,35 @@ def plan_edges(plan: str) -> dict[str, set[str]] | None:
                 continue
             edges[ids[0]] = set(TICKET_RE.findall(cells[1]))
     return edges or None
+
+
+def check_dispatch_table(plan: str) -> None:
+    """Section 9's tier -> model/effort table must match TIER_DISPATCH."""
+    seen: dict[str, tuple[str, str]] = {}
+    in_table = False
+    for line in plan.splitlines():
+        cells = _row_cells(line) if line.strip().startswith("|") else None
+        if cells and len(cells) >= 4 and cells[0] == "Tier" and cells[2] == "Codex model":
+            in_table = True
+            continue
+        if in_table:
+            if not cells or len(cells) < 4:
+                break
+            if set(cells[0]) <= set("-: "):
+                continue
+            tier = cells[0].strip("`")
+            model = cells[2].replace("*", "").replace("5.6", "").strip()
+            effort = cells[3].strip("`* ")
+            seen[tier] = (model, effort)
+    if not seen:
+        fail("PLAN.md: could not find the section 9 dispatch table")
+        return
+    for tier, expected in TIER_DISPATCH.items():
+        got = seen.get(tier)
+        if got is None:
+            fail(f"PLAN.md section 9 has no row for tier {tier!r}")
+        elif got != expected:
+            fail(f"PLAN.md section 9 dispatches {tier!r} to {got}, script says {expected}")
 
 
 def plan_milestones(plan: str) -> list[tuple[str, list[str], int, int]] | None:
@@ -406,6 +444,8 @@ def main() -> int:
     critical_tier = {t["id"] for t in tickets if t["tier"] == "safety-critical"}
     budget = len(tickets) - len(human) + len(critical_tier)
 
+    check_dispatch_table(plan)
+
     milestones = plan_milestones(plan)
     if milestones is None:
         fail("PLAN.md: could not find the section 12 estimates table")
@@ -457,7 +497,8 @@ def main() -> int:
     print(f"{len(tickets)} tickets, graph is acyclic")
     print("PLAN.md section 5 agrees with tickets.yaml on every edge and every wave")
     print("PLAN.md section 12 places every ticket once and its arithmetic checks out")
-    print(f"stale-phrase sweep clean ({len(STALE_PHRASES)} known-removed phrases)\n")
+    print(f"stale-phrase sweep clean ({len(STALE_PHRASES)} known-removed phrases)")
+    print("PLAN.md section 9 dispatch table matches the tier mapping\n")
     print("WAVES")
     for i, wave in enumerate(waves, 1):
         marks = ", ".join(w + (" (human)" if w in human else "") for w in wave)

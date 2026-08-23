@@ -9,9 +9,19 @@
 #   human        true = a person must do this, do not dispatch an agent
 #   reads        contract docs the implementer must read before coding
 #   body         Linear issue description, verbatim
+#
+# LINEAR NUMBERING: add 4.
+#   Linear's own AIR-1..AIR-4 are its onboarding issues and predate this
+#   project; its counter does not rewind. So canonical AIR-n is Linear AIR-(n+4):
+#   AIR-1 -> AIR-5, AIR-17 -> AIR-21, AIR-18 -> AIR-22.
+#   Every issue title is prefixed with its canonical id and every description
+#   states its own mapping, so the canonical id is never inferred from the URL.
+#   Ids in THIS file and in all docs are always canonical.
 version: 1
 project: Airgap
 team_key: AIR
+linear_workspace: airgap-hardware
+linear_id_offset: 4
 
 tickets:
 
