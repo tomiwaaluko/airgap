@@ -23,6 +23,10 @@ uv run ruff check . --fix # lint
 uv run mypy src/          # types
 ```
 
+Design intent (why the system is shaped this way):
+
+- `docs/DESIGN.md` — problem, threat model, design decisions, flows, failure analysis
+
 Contracts (frozen — read before coding, do not edit casually):
 
 - `docs/spec/00-overview.md` — system, boundaries, invariants

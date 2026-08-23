@@ -69,6 +69,9 @@ spikes/                        De-risking experiments and their recorded results
 
 ## Read next
 
+- [`../DESIGN.md`](../DESIGN.md) — **why** the system is shaped this way: threat
+  model, design decisions and the alternatives rejected, end-to-end flows,
+  failure analysis. Read once before your first ticket.
 - [`01-serial-protocol.md`](01-serial-protocol.md) — the wire contract. Frozen.
 - [`02-supervisor.md`](02-supervisor.md) — safety rules. Frozen.
 - [`03-broker-api.md`](03-broker-api.md) — HTTP + MCP contract. Frozen.

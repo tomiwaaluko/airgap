@@ -13,13 +13,16 @@ sessions, gate their output, and escalate to me when something needs a human.
 
 1. Read `AGENTS.md` at the repo root, in full. It is the cold-start context every
    session you dispatch will also read.
-2. Read `docs/spec/00-overview.md` for the system shape.
-3. Read `docs/tickets/tickets.yaml`. It is the **source of truth** for the ticket
+2. Read `docs/DESIGN.md` — especially §4 (threat model), §6 (design decisions and
+   the alternatives rejected) and §12 (open questions). Sessions that understand
+   *why* a contract is shaped the way it is argue with it far less.
+3. Read `docs/spec/00-overview.md` for the system shape.
+4. Read `docs/tickets/tickets.yaml`. It is the **source of truth** for the ticket
    set. Linear mirrors it. If they ever disagree, this file wins.
-4. Read `spikes/01-blocking-tool-call/FINDINGS.md` so you know which
+5. Read `spikes/01-blocking-tool-call/FINDINGS.md` so you know which
    architectural questions are already settled and must not be relitigated.
 
-Do not start dispatching until you have read all four.
+Do not start dispatching until you have read all five.
 
 ## Step 1 — Create the Linear issues
 

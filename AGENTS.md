@@ -52,11 +52,16 @@ comments instead of implementing it.**
 
 ## 3. Read the contracts before you write code
 
-These are **frozen**. They are not suggestions, and they are not yours to
+`docs/DESIGN.md` explains intent; the `docs/spec/` documents are the contracts you
+write code against. Where they disagree, the contract is what compiles and the
+disagreement is a bug a human must resolve — flag it, don't pick a side.
+
+The contracts are **frozen**. They are not suggestions, and they are not yours to
 improve. If you think one is wrong, comment on the Linear ticket and stop.
 
 | Document | Read it when your ticket touches |
 |---|---|
+| `docs/DESIGN.md` | **why** the system is shaped this way — read §4 (threat model) and §6 (design decisions) once, before your first ticket |
 | `docs/spec/00-overview.md` | anything — read this first, always |
 | `docs/spec/01-serial-protocol.md` | the wire format, codec, bridge, or firmware |
 | `docs/spec/02-supervisor.md` | validation, safety, the relay interlock |
