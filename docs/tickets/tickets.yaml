@@ -41,8 +41,10 @@ tickets:
         what is declared here rather than adding their own, so the set must
         already include `hypothesis` (property tests in AIR-2 and AIR-11),
         `freezegun` (AGENTS.md §6 forbids `sleep()` in tests) and `rich`
-        (AIR-18). A ticket that has to add one of these has found a defect in
-        this ticket, not a reason to edit `pyproject.toml` quietly.
+        (AIR-18), plus `hatchling` as the build backend required to install the
+        `src/`-layout package from a clean clone. A ticket that has to add one of
+        these has found a defect in this ticket, not a reason to edit
+        `pyproject.toml` quietly.
       - Package skeleton at `src/airgap/` with `__init__.py` and empty typed stubs
         for the modules named in `docs/spec/00-overview.md`. Stubs raise
         `NotImplementedError`; they exist so imports resolve.

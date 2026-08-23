@@ -1,0 +1,2 @@
+"""Airgap physical consent terminal."""
+
