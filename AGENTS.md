@@ -148,15 +148,16 @@ yours doesn't, you must not need hardware.
   asked to send a forbidden command is a programming error.
 - **No new dependencies** without saying so in the ticket comment. The stack is
   fastapi, uvicorn, pydantic, sqlalchemy, alembic, httpx, pyserial, mcp,
-  anthropic, rich, pytest, hypothesis, freezegun, ruff, mypy. That should be
-  enough. All of it goes into `pyproject.toml` at AIR-1 — a later ticket that
-  needs one of these is not adding a dependency, it is using one already
-  declared, and does not need a comment.
+  anthropic, rich, pytest, hypothesis, freezegun, ruff, mypy, hatchling. That
+  should be enough. All of it goes into `pyproject.toml` at AIR-1 — a later
+  ticket that needs one of these is not adding a dependency, it is using one
+  already declared, and does not need a comment.
 
   `hypothesis` is required by the property tests in AIR-2 and AIR-11, `freezegun`
   by §6's no-`sleep()` rule, and `rich` by the terminal reader. They are listed
   here because a ticket cannot both honour "the stack is the AGENTS.md list" and
-  add something absent from it.
+  add something absent from it. `hatchling` is the build backend required so
+  `uv sync` can install the `src/`-layout package from a clean clone.
 
   **`scripts/validate_plan.py` deliberately depends on none of this.** It is the
   pre-dispatch gate and must run on a bare checkout, before `pyproject.toml`

@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "airgap"
+version = "0.1.0"
+description = "Physical consent terminal for autonomous AI agents"
+requires-python = ">=3.14"
+dependencies = [
+  "fastapi",
+  "uvicorn",
+  "pydantic",
+  "sqlalchemy",
+  "alembic",
+  "httpx",
+  "pyserial",
+  "mcp",
+  "anthropic",
+  "rich",
+]
+
+[dependency-groups]
+dev = [
+  "pytest",
+  "hypothesis",
+  "freezegun",
+  "ruff",
+  "mypy",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/airgap"]
+
+[tool.ruff]
+target-version = "py314"
+line-length = 88
+exclude = ["scripts", "spikes"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+strict = true
+python_version = "3.14"
+files = ["src/"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
