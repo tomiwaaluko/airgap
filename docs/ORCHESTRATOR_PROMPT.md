@@ -1,8 +1,10 @@
 # Codex Orchestrator — Start-Off Prompt
 
-**Current for `PLAN.md` v1.1 / `DESIGN.md` v1.3 / `spec/02` v1.1 / `spec/03`
-v1.1.** Two design reviews and one plan review have changed these documents.
-Do not use a cached copy.
+**Current for `PLAN.md` v1.2 / `DESIGN.md` v1.4 / `spec/00`, `01`, `02`, `03` at
+v1.1.** Four review rounds have changed these documents. Do not use a cached
+copy — three of the four rounds found a defect that was *created by the previous
+round's fix*, so a stale copy is not merely out of date, it is likely to contain
+a contradiction that has since been retracted.
 
 Paste the block below into the Codex orchestrator session.
 
@@ -184,6 +186,7 @@ sessions found, what is queued next. Keep it short.
 
 ---
 
-Begin with Step 0. Report back after Step 1 with the created issue ids and the
+Begin with Step 0. Report back after Step 1 with the reconciliation result — what
+matched, and anything you had to correct in Linear — together with the
 output of `scripts/validate_plan.py`, then wait for my go-ahead before dispatching
 wave 1.

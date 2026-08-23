@@ -1,4 +1,11 @@
-# Serial Protocol — FROZEN CONTRACT v1
+# Serial Protocol — FROZEN CONTRACT v1.1
+
+> **v1.1 (2026-08-23), plan review 02 C1 and I7.** Two defects, both of the same
+> kind: `ev.lease_expired` still described the v1.1 host behaviour that `spec/02`
+> Rule 4c replaced, and the `err` list omitted `not_closed` while the relay table
+> above it acked exactly that. Sibling drift, one document over from where the
+> last sweep stopped.
+
 
 Do not extend, rename, or "improve" anything on this page. Every component on
 both sides of the cable is written against it. If you believe it is wrong, stop
@@ -73,7 +80,12 @@ autonomously, and it is a deadline rather than a judgment — see `DESIGN.md` D8
 {"id":9,"ok":false,"err":"unknown_cmd"}
 ```
 
-`err` is one of: `unknown_cmd`, `bad_field`, `out_of_range`, `not_armed`, `busy`.
+`err` is one of: `unknown_cmd`, `bad_field`, `out_of_range`, `not_armed`,
+`not_closed`, `busy`.
+
+`not_closed` is the `relay_renew` ack on an open contact, from the table above.
+It was missing from this list in v1 — a both-directions vocabulary lint (AIR-16)
+fails on exactly that gap, which is what it is for.
 
 ### Events — unsolicited, no `id`
 
@@ -84,8 +96,21 @@ autonomously, and it is a deadline rather than a judgment — see `DESIGN.md` D8
 ```
 
 - `ev.lease_expired` — the device opened the relay itself because the host stopped
-  renewing. The host must treat this as a link/health fault, resolve any pending
-  request as `denied` with reason `lease_expired`, and audit it.
+  renewing. **The host's handling is scoped to the armed request and is specified
+  in [`02-supervisor.md`](02-supervisor.md) Rule 4c.** In short: armed and
+  mid-dwell, it is a fault — audit it, mark the cycle incomplete, disarm, and
+  **leave the verdict `approved` unchanged**, because the human did approve and
+  it was the actuation window that was cut short. Unarmed, it is a stray — audit
+  it, confirm the contact is open, and change nothing.
+
+  <!-- stale-ok: quotes the v1 sentence in order to retract it -->
+  > **v1 of this document said "resolve any pending request as `denied` with
+  > reason `lease_expired`."** That is the behaviour Rule 4c exists to forbid: it
+  > lets a stray device event deny a queued request nobody ruled on, and it
+  > rewrites a verdict a human already gave. `spec/02` v1.1 removed the sentence
+  > from its own test list and this file kept it — the same sibling-drift defect
+  > one document later. If you are reading a cached copy that still says
+  > `denied`, that copy is wrong.
 
 - `ev.btn.which` — `approve` | `deny` | `never`.
 - `ev.btn.req` — the request id from the last `arm`. If the device is not armed

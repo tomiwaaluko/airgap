@@ -1,6 +1,9 @@
 # Airgap — System Overview
 
-**Status:** frozen for implementation
+**Status:** frozen for implementation. **v1.1 (2026-08-23), plan review 02 M4:**
+`vocab.py` added to the layout. AIR-1 stubs "the modules named in `spec/00`" and
+must also demonstrate `import airgap.vocab`, which wave 1 could not do while the
+frozen overview did not name the file.
 **Owner:** Tomiwa Aluko
 
 ## What this is
@@ -80,6 +83,8 @@ stop and flag it rather than implementing it.
 ```
 firmware/airgap/airgap.ino     Arduino command interpreter (one sketch, never reflashed mid-demo)
 src/airgap/
+  vocab.py                     Every closed vocabulary, defined once. StrEnum, no I/O,
+                               no internal imports. Nothing else may declare these.
   protocol.py                  Frame encode/decode. Pure functions, no I/O.
   transport.py                 SerialTransport + MockTransport behind one interface.
   supervisor.py                Validation, clamps, rate limits, fail-safe.

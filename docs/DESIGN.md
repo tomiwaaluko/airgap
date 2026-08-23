@@ -1,9 +1,9 @@
 # Airgap — Design Specification
 
-**Version:** 1.3
+**Version:** 1.4
 **Date:** 2026-08-23
-**Status:** revised after design reviews 01 and 02 and the plan review — see
-[`reviews/`](reviews/)
+**Status:** revised after design reviews 01 and 02 and plan reviews 01 and 02 —
+see [`reviews/`](reviews/)
 **Author:** Tomiwa Aluko
 
 ---
@@ -607,7 +607,7 @@ What the human perceives, and what it means.
 | Idle, no pending request | off | down | — | `AIRGAP READY` / dial level |
 | **Auto-approved** | **off — unchanged** | down | — | action, briefly |
 | Pending, low risk | amber | up | `alert` ×1 | action / blast radius |
-| Pending, high risk | red | up | `alert` ×3 | short code + `SEE DASHBOARD` |
+| Pending, high risk | red | up | `alert` ×3 | short code + `SEE READER` |
 | Approved by human | green, 2 s | down | `ok` ×2 | `APPROVED` |
 | Denied | red, 2 s | down | `deny` ×2 | `DENIED` |
 | Safe state / link lost | red, steady | up | `deny` ×1 | `LINK LOST` |
@@ -633,6 +633,13 @@ Principles:
   the web dashboard, either one — and the human reads the real thing there. The
   requirement is that *some* full-fidelity surface is open, not that it is the
   browser one; §4.2 explains why the terminal is the safer default.
+
+  <!-- stale-ok: this paragraph quotes the removed LCD copy to explain it -->
+  The LCD copy is therefore `SEE READER`, not `SEE DASHBOARD`. The earlier
+  wording named a surface that, once the reader became a role, is **not built at
+  the milestone that owns high-risk approval** — the terminal ships in M2 and the
+  dashboard in M4, so a device saying `SEE DASHBOARD` would have sent the
+  operator to something that does not exist yet. The copy names the role.
 - **The dial level is visible when idle**, so the operator knows their posture.
 
 **LCD is optional hardware** (spec/04). Every state above must remain

@@ -330,6 +330,20 @@ tickets:
         capability is absent from the scope, not merely unused.
       - Requests park on an `asyncio.Event`. Exactly one armed at a time; others
         queue FIFO with their callers still blocked.
+      - **Mint the per-arm short code, and drive the LCD from the risk class.**
+        This is the T1 control in `DESIGN.md` §4.2/§9/§13 and until now no ticket
+        produced it -- AIR-18 asserts it matches, and nothing generated it.
+        - On each `arm`, generate a fresh short code: a **per-arm nonce**, not a
+          prefix of `request_id` and not derived from it. Re-arming the same
+          request produces a **different** code. That is the whole point: a stale
+          row in a reader must not be able to match a live request.
+        - Low/medium risk: LCD shows the action, as today.
+        - **High risk: the LCD must never show a truncatable identifier.** It
+          shows the short code and `SEE READER`. The copy names the *role* and
+          not any particular surface, because at M2 the dashboard does not exist
+          yet and the terminal reader does.
+        - The code is exposed on the `ui`/`ui_ro` read routes so a reader can
+          display it alongside the full action.
       - 30-minute configurable expiry resolving to `expired`, relay open.
       - Startup recovery: disarm, open relay, mark stale pending rows `link_lost`.
       - Every state change written to the audit log **before** it is acted on.
@@ -348,9 +362,22 @@ tickets:
         **no scope reaches another's routes** -- all six directions, not just the
         `agent`/`ui` pair -- and specifically that `ui_ro` gets `403` from
         `PUT /policies/{pattern}`.
-      - Broker binds 127.0.0.1. `/request_approval` and `ui_ro` routes reject any
-        request carrying an `Origin` header; `ui` routes allowlist it instead,
-        since the dashboard is a browser and does send one.
+      - Broker binds 127.0.0.1. **`Origin` handling keys on the presented token
+        scope, never on the route.** `agent` and `ui_ro` reject any request
+        carrying `Origin`; `ui` allowlists it, because the dashboard is a browser
+        and does send one.
+
+        This distinction is load-bearing and easy to get backwards. `GET /pending`
+        is reachable by **both** `ui` and `ui_ro`, so "`ui_ro` routes reject
+        `Origin`" is not a well-defined rule -- implemented literally it rejects
+        the dashboard's own read of the queue, which is design review 02's
+        blanket-`Origin` break replayed on the shared read path. One route, two
+        behaviours, chosen by the credential. See `docs/spec/03-broker-api.md`.
+      - **High-risk requests never put a truncatable identifier on the LCD.**
+        Assert it directly: a request with a long, near-colliding `tool_args`
+        classified `high` produces LCD copy containing the short code and no
+        prefix of the argument. This is `DESIGN.md` §13's T1 obligation.
+      - Re-arming a request mints a **different** short code than the first arm.
       - Audit rows are written **before** callers are released and before the
         relay moves. Assert the ordering, not merely that both occurred.
       - Two concurrent requests: the second stays blocked while the first is
@@ -424,7 +451,12 @@ tickets:
       - Property test: for all inputs, `resolve()` never returns a verdict more
         permissive than the Warden's. Assert this as an invariant, not a case.
       - Turning the dial up never makes an outcome more permissive.
-      - No imports from elsewhere in `airgap`.
+      - `airgap.vocab` is the **only** internal import permitted, and there is no
+        I/O. `Verdict`, `decided_by` and the policy action names come **from
+        `vocab.py`**; declaring them inline here is the drift AIR-16 exists to
+        stop. This is the pure-core rule as stated in AGENTS.md §5 and `PLAN.md`
+        P1 -- an earlier draft of this ticket said "no imports from elsewhere in
+        `airgap`", which contradicted it.
 
       ## Verification
       `uv run pytest tests/test_policy.py -v`
@@ -497,6 +529,15 @@ tickets:
         (anything → `auto_approve`), and every edit is written to the audit log
         with who made it. Widening is software-writable and that is a known
         limitation (DESIGN.md N-T8) — make it visible rather than quiet.
+      - **A restrictive Content-Security-Policy is set and tested.** `PLAN.md` §6
+        requires it and this ticket previously never mentioned it. The dashboard
+        is the browser reader, and design review 02 finding I7 accepted it as
+        *new attack surface inside Z2* specifically because XSS there is a T1
+        bypass -- a rendered request could misrepresent what the human is about
+        to approve. Default-src `'self'`; no `unsafe-inline`, no `unsafe-eval`,
+        no remote script origin. Assert the header is present on every response,
+        and include a hostile fixture: `tool_args` and `justification` containing
+        markup and a script tag must render as **text**, never as elements.
       - Queue updates within 1 s of a request arriving, no manual refresh.
       - A failed chain verification is visually unmistakable.
       - Readable at 1280x800 (projector resolution) — this gets demoed.
@@ -543,6 +584,15 @@ tickets:
       - a `relay_gated` row set to `auto_approve` resolves `escalate`
       - device reset mid-request resolves `denied` / `device_reset`, never approved
       - link loss mid-request resolves to verdict `link_lost`, relay open
+      - **high-risk readability (`DESIGN.md` §13's T1 obligation)**: a `high`-risk
+        request with a long, near-colliding argument -- `users_production` against
+        `users_prod_bak` -- puts **no truncatable identifier** on the LCD, shows
+        the short code and `SEE READER`, and the reader carries the full
+        untruncated action. `PLAN.md` §5 justifies this ticket's dependency on
+        AIR-18 as "the reader is how high-risk scenarios are asserted"; this is
+        that assertion
+      - **re-arming mints a fresh short code**: a stale reader row from the first
+        arm does not match the second, so it cannot be mistaken for live
       - a button event with a mismatched `req` does not close the relay and the
         request stays pending
       - a second button press inside the 2 s arming dead time binds to nothing
@@ -607,7 +657,7 @@ tickets:
         fails -- one-way checking is how dead vocabulary accumulates.
 
         **`spec/02` is not optional coverage, it is the point.** It is where the
-        drift has actually happened twice: it said "the eight commands" while
+        drift has actually happened twice: it miscounted the command list while
         `spec/01` listed nine, and its test obligations contradicted its own
         Rules 4b and 4c. A lint whose coverage map excludes the document that
         drifts is decoration. Check at least: the command count and names, the
@@ -702,6 +752,15 @@ tickets:
       - renewal continues after the verdict is returned; it stops on dwell expiry,
         explicit open, safe state or disarm -- **never on verdict**
       - a consent-channel (non-`relay_gated`) request sends **no relay command**
+      - **an auto-approved request never closes the relay, however policy is
+        configured.** This is a *different* test from the one above and `spec/02`
+        requires both: `relay_gated` is a policy bit, `auto_approve` is a verdict,
+        and D12 needs the pair. Configure the row `relay_gated = true` **and**
+        `auto_approve` -- the combination that would close a contact with no human
+        present if Rule 4 were written in terms of verdicts instead of button
+        events. Assert the mechanism: an auto-approved request produces no button
+        event, so condition 2 can never be satisfied. Do not settle for observing
+        that the contact stayed open
       - the audit row precedes the relay close -- assert the ordering
       - `lease_expired` while armed mid-dwell does not change the verdict
       - `lease_expired` while unarmed touches no queued request

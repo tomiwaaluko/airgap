@@ -1,11 +1,12 @@
 # Airgap — Implementation Plan
 
-**Version:** 1.1
+**Version:** 1.2
 **Date:** 2026-08-23
-**Status:** revised after plan review 01 — see
-[`reviews/2026-08-23-plan-review.md`](reviews/2026-08-23-plan-review.md)
-**Covers:** `DESIGN.md` v1.3, `spec/02` v1.1, `spec/03` v1.1, and `spec/00`,
-`01`, `04`, `05` at v1
+**Status:** revised after plan reviews
+[01](reviews/2026-08-23-plan-review.md) and
+[02](reviews/2026-08-23-plan-review-02.md). Both dispositions are written in.
+**Covers:** `DESIGN.md` v1.4, `spec/00` v1.1, `spec/01` v1.1, `spec/02` v1.1,
+`spec/03` v1.1, and `spec/04`, `05` at v1
 
 ---
 
@@ -84,13 +85,19 @@ Everything in `DESIGN.md` §3 Goals, single-host, one device, one operator.
 | Milestone | If you stop here, you have | You do not have |
 |---|---|---|
 | **M1** | The interlock provably correct on mock hardware | Any agent integration |
-| **M2 — MVP** | A blocking MCP approval gate, triaged, policy-bounded, audited | Physical hardware, high-risk readability |
+| **M2 — MVP** | A blocking MCP approval gate, triaged, policy-bounded, audited, **at every risk class including high** | Physical hardware, a browser UI |
 | **M3** | All of that, physically enforced on a real device | A presentable demo |
-| **M4** | The demo | — |
+| **M4** | The demo, and the dashboard | — |
 
-**M2 is the MVP** — the thesis proven end to end. One caveat, see §4.3: M2
-supports **low and medium risk only**, because v1.2 made a full-fidelity reader a
-prerequisite for high-risk approval.
+**M2 is the MVP** — the thesis proven end to end, at all three risk classes.
+AIR-18 ships the full-fidelity reader §9 requires for high-risk, so nothing is
+cut by risk class.
+
+> This table used to say M2 lacked "high-risk readability" and supported "low and
+> medium risk only". That was the leftover of the pre-Q1 draft, when the reader
+> was assumed to be the dashboard and the dashboard was M4. **Q1 moved the reader
+> into M2, and this table did not follow** — leaving §3 and §4.3 asserting
+> opposite MVP scopes, with §3 being the one an orchestrator reads first.
 
 ---
 
@@ -106,7 +113,7 @@ and numeric order are not the same thing — read §5, not the numbers.
 |---|---|---|---|
 | **AIR-16** | Vocabulary single-source and spec lint | `design` | P1. Every enum — commands, errors, verdicts, `decided_by`, audit events, LED states, tone patterns — defined once in `src/airgap/vocab.py`, with a CI test that parses the spec tables and fails on any mismatch. Nothing else may define these inline |
 | **AIR-17** | Relay interlock and cycle | `safety-critical` | P3. Rules 4, 4a, 4b, 4c split out of AIR-6: arming state machine, verdict minting, gated close, ungated renew, dwell, `lease_expired` scoping, dead time |
-| **AIR-18** | `airgap watch` terminal reader | `standard` | §4.3. A full-fidelity view of the pending request in a terminal, over `ui` scope. No browser |
+| **AIR-18** | `airgap watch` terminal reader | `standard` | §4.3. A full-fidelity view of the pending request in a terminal, over **`ui_ro`** scope — reads only, no policy-write capability. No browser |
 
 AIR-6 narrows correspondingly to Supervisor **core**: allowlist, typed commands,
 clamps, the four rate limits, tick watchdog, and the safe-state transition.
@@ -216,6 +223,13 @@ makes the claim true rather than aspirational.
 **Critical path:** AIR-1 → 16 → 2 → 3 → 6 → 17 → 9 → 10 → 14 → 15. Ten waves, so
 ten sequential agent sessions minimum. **Peak concurrent agent sessions is 3** —
 wave 4 holds four tickets but AIR-5 is human, so it does not consume a session.
+
+**Waves are dependency order, not milestone order.** AIR-13 becomes *eligible* in
+wave 8 because AIR-9 has merged, but it belongs to M4 and nothing in M2 needs it.
+If §13 Q2 lands on "cut", AIR-13 is deferred past the M2 gate rather than run
+alongside AIR-10 and AIR-18 — it would otherwise consume one of only three peak
+slots to build something the MVP does not require. Eligible is not the same as
+scheduled; the orchestrator may hold an M4 ticket until its milestone.
 
 ### The real-world dependency nobody schedules
 
@@ -423,17 +437,21 @@ given in sessions and gates rather than hours.
 
 | Milestone | New tickets | Agent sessions | Human gates | Blocked by anything external |
 |---|---|---|---|---|
-| M0 | AIR-1, 16 | 2 | 1 | — |
-| M1 | AIR-2, 3, 4, 6, 7, 8, 17 | 7 + 3 adversarial | 1 | — |
-| M2 | AIR-9, 10, 11, 12, 18 | 5 + 1 adversarial | 1 | — |
+| M0 | AIR-1, AIR-16 | 2 | 1 | — |
+| M1 | AIR-2, AIR-3, AIR-4, AIR-6, AIR-7, AIR-8, AIR-17 | 7 + 3 adversarial | 1 | — |
+| M2 | AIR-9, AIR-10, AIR-11, AIR-12, AIR-18 | 5 + 1 adversarial | 1 | — |
 | M3 | AIR-5 *(human)* | 0 | 1 | **Parts delivery** |
-| M4 | AIR-13, 14, 15 | 3 | 1 | M3 |
-| | **17 + 4 adversarial** | **21** | **5** | |
+| M4 | AIR-13, AIR-14, AIR-15 | 3 | 1 | M3 |
 
-The 17 agent tickets and 4 adversarial passes are the same 21 that
-`scripts/validate_plan.py` prints as the session budget; the two numbers are
-derived from the same graph and must stay equal. A previous draft put M1 at
-"9 + 3", double-counting M0's two tickets.
+**This table is machine-checked too.** `scripts/validate_plan.py` asserts that
+every ticket appears in exactly one milestone row, that the agent-session numbers
+sum to the budget it computes from the graph (21), and that the gates sum to 5.
+Ticket ids are written out in full rather than as "AIR-2, 3, 4" precisely so a
+machine can read them.
+
+A previous draft put M1 at "9 + 3", double-counting M0's two tickets, and the
+claim that these numbers "must stay equal" was checked by eye. It is not any
+more.
 
 M3 has zero agent sessions and is the most likely thing to slip, because it
 depends on shipping and a soldering iron rather than on tokens.
@@ -472,7 +490,12 @@ Planning is done when all of these are true:
 - [x] Q1 is answered, since it moves a ticket between milestones
 - [x] Every milestone gate is a command, not a document reference. M1's used to
       name `spec/02`, whose own test list contradicted its own rules
-- [x] A consistency sweep over `DESIGN.md` + `spec/` finds no contradictions
+- [x] A consistency sweep over `DESIGN.md` + `spec/` finds no contradictions,
+      **and the recurring ones are now machine-checked** — `validate_plan.py`
+      carries a stale-phrase list seeded with every contradiction the three
+      review rounds actually found, so the same sentence cannot survive the next
+      sweep. This box was ticked once while it was false (plan review 02 C1);
+      it is no longer a matter of anyone's memory
 - [ ] The human has signed off
 
 Nothing in `DESIGN.md` §12's open items blocks this: Q5 (cut-short dwell), R7–R10

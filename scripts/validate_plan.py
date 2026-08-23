@@ -211,6 +211,32 @@ def plan_edges(plan: str) -> dict[str, set[str]] | None:
     return edges or None
 
 
+def plan_milestones(plan: str) -> list[tuple[str, list[str], int, int]] | None:
+    """Parse the section 12 estimates table.
+
+    Returns (milestone, ticket ids, agent sessions, human gates) per row. The
+    session cell reads like "7 + 3 adversarial", so every integer in it counts.
+    """
+    rows: list[tuple[str, list[str], int, int]] = []
+    in_table = False
+    for line in plan.splitlines():
+        cells = _row_cells(line) if line.strip().startswith("|") else None
+        if cells and len(cells) >= 4 and cells[0] == "Milestone" and cells[1] == "New tickets":
+            in_table = True
+            continue
+        if in_table:
+            if not cells or len(cells) < 4:
+                break
+            if set(cells[0]) <= set("-: "):
+                continue
+            if not re.fullmatch(r"M\d+", cells[0]):
+                continue
+            sessions = sum(int(n) for n in re.findall(r"\d+", cells[2]))
+            gates = sum(int(n) for n in re.findall(r"\d+", cells[3]))
+            rows.append((cells[0], TICKET_RE.findall(cells[1]), sessions, gates))
+    return rows or None
+
+
 def plan_waves(plan: str) -> list[list[str]] | None:
     """Parse the section 5 'Wave | Tickets | Parallel' table."""
     waves: list[list[str]] = []
@@ -230,6 +256,76 @@ def plan_waves(plan: str) -> list[list[str]] | None:
 
 
 # --------------------------------------------------------------------------
+# Stale-phrase sweep
+# --------------------------------------------------------------------------
+# Every entry here is a defect that actually shipped and was actually fixed.
+# Three review rounds found the same failure twice each: a contract is corrected
+# in one file and its sibling keeps the old sentence. The reviews caught those.
+# This catches them the next time, before dispatch, for free.
+#
+# `docs/reviews/` is excluded because a disposition has to quote the defect it
+# closed. Add an entry whenever a sweep removes a phrase; the cost is one line.
+
+STALE_PHRASES: list[tuple[str, str]] = [
+    ("as `denied` with reason `lease_expired`",
+     "spec/02 Rule 4c: lease_expired never denies a request. Plan review 02 C1"),
+    ("resolve any pending request as `denied`",
+     "spec/02 Rule 4c: a stray device event must not resolve a queued request"),
+    ("SEE DASHBOARD",
+     "the reader is a role; the dashboard is M4 and does not exist at M2. Plan review 02 I1"),
+    ("the eight commands",
+     "spec/01 lists nine. Plan review 01 C1"),
+    ("low and medium risk only",
+     "AIR-18 puts the reader in M2, so high risk is in the MVP. Plan review 02 I1"),
+    ("stops** immediately on resolution",
+     "spec/02 Rule 4b: renewal never stops on verdict. Plan review 01 C1"),
+]
+
+SWEEP_SKIP = ("docs/reviews", ".git", ".venv", "node_modules")
+
+# A document explaining that a phrase was removed has to quote the phrase. That
+# is the documentation working, not a regression -- the same distinction that
+# rescoped the `/decide` lint in plan review 01 I1. Put `stale-ok` anywhere in
+# the paragraph and the whole paragraph is exempt, because a retraction runs to
+# several sentences and often quotes the phrase more than once. A paragraph is a
+# run of non-blank lines. The marker is greppable, so "what are we deliberately
+# still quoting?" stays a one-command question.
+SWEEP_EXEMPT = "stale-ok"
+
+
+def _exempt_lines(lines: list[str]) -> set[int]:
+    """1-indexed line numbers inside a paragraph containing the marker."""
+    exempt: set[int] = set()
+    start = 0
+    for i in range(len(lines) + 1):
+        if i == len(lines) or not lines[i].strip():
+            block = lines[start:i]
+            if any(SWEEP_EXEMPT in line for line in block):
+                exempt.update(range(start + 1, i + 1))
+            start = i + 1
+    return exempt
+
+
+def stale_phrase_sweep() -> None:
+    for path in sorted(ROOT.rglob("*.md")) + sorted(ROOT.rglob("*.yaml")):
+        rel = path.relative_to(ROOT).as_posix()
+        if any(part in rel for part in SWEEP_SKIP):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        lines = text.splitlines()
+        exempt = _exempt_lines(lines)
+        for phrase, why in STALE_PHRASES:
+            if phrase not in text:
+                continue
+            for n, line in enumerate(lines, 1):
+                if phrase in line and n not in exempt:
+                    fail(f"{rel}:{n} contains removed phrase {phrase!r} -- {why}")
+
+
+# --------------------------------------------------------------------------
 
 
 def main() -> int:
@@ -240,6 +336,7 @@ def main() -> int:
         return 1
 
     cross_check_with_pyyaml(TICKETS.read_text(encoding="utf-8"), tickets)
+    stale_phrase_sweep()
 
     by_id = {t["id"]: t for t in tickets}
     if len(by_id) != len(tickets):
@@ -305,6 +402,38 @@ def main() -> int:
     elif stated_waves != waves:
         fail("PLAN.md wave table does not match the computed schedule (correct table printed below)")
 
+    human = {t["id"] for t in tickets if t.get("human")}
+    critical_tier = {t["id"] for t in tickets if t["tier"] == "safety-critical"}
+    budget = len(tickets) - len(human) + len(critical_tier)
+
+    milestones = plan_milestones(plan)
+    if milestones is None:
+        fail("PLAN.md: could not find the section 12 estimates table")
+    else:
+        placed: dict[str, str] = {}
+        for name, ids, _, _ in milestones:
+            for tid in ids:
+                if tid in placed:
+                    fail(f"PLAN.md section 12: {tid} appears in both {placed[tid]} and {name}")
+                placed[tid] = name
+        for tid in sorted(set(deps) - set(placed)):
+            fail(f"PLAN.md section 12: {tid} is in no milestone row")
+        for tid in sorted(set(placed) - set(deps)):
+            fail(f"PLAN.md section 12: milestone row names {tid}, not in tickets.yaml")
+
+        stated_sessions = sum(m[2] for m in milestones)
+        if stated_sessions != budget:
+            fail(
+                f"PLAN.md section 12 sessions sum to {stated_sessions}, "
+                f"but the graph gives a budget of {budget}"
+            )
+        stated_gates = sum(m[3] for m in milestones)
+        if stated_gates != len(milestones):
+            fail(
+                f"PLAN.md section 12 has {len(milestones)} milestones "
+                f"but {stated_gates} human gates; expected one each"
+            )
+
     @functools.lru_cache(maxsize=None)
     def depth(node: str) -> int:
         return 1 + max((depth(d) for d in deps[node]), default=0)
@@ -314,9 +443,6 @@ def main() -> int:
     while deps[path[-1]]:
         path.append(max(deps[path[-1]], key=depth))
     path.reverse()
-
-    human = {t["id"] for t in tickets if t.get("human")}
-    critical_tier = {t["id"] for t in tickets if t["tier"] == "safety-critical"}
 
     agent_peak = max(len([w for w in wave if w not in human]) for wave in waves)
 
@@ -329,7 +455,9 @@ def main() -> int:
         return report()
 
     print(f"{len(tickets)} tickets, graph is acyclic")
-    print("PLAN.md section 5 agrees with tickets.yaml on every edge and every wave\n")
+    print("PLAN.md section 5 agrees with tickets.yaml on every edge and every wave")
+    print("PLAN.md section 12 places every ticket once and its arithmetic checks out")
+    print(f"stale-phrase sweep clean ({len(STALE_PHRASES)} known-removed phrases)\n")
     print("WAVES")
     for i, wave in enumerate(waves, 1):
         marks = ", ".join(w + (" (human)" if w in human else "") for w in wave)
