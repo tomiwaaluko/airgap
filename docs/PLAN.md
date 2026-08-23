@@ -1,9 +1,11 @@
 # Airgap — Implementation Plan
 
-**Version:** 1.0
+**Version:** 1.1
 **Date:** 2026-08-23
-**Status:** awaiting review
-**Covers:** `DESIGN.md` v1.2 and `spec/00`–`05` as of commit `fcdcf1b`
+**Status:** revised after plan review 01 — see
+[`reviews/2026-08-23-plan-review.md`](reviews/2026-08-23-plan-review.md)
+**Covers:** `DESIGN.md` v1.3, `spec/02` v1.1, `spec/03` v1.1, and `spec/00`,
+`01`, `04`, `05` at v1
 
 ---
 
@@ -38,6 +40,15 @@ recurring bug was the same word meaning different things in different files:
 would have become a code bug. **Mitigation:** AIR-16 single-sources every
 vocabulary into one module and lints the spec tables against it in CI. It is the
 second ticket, before any behaviour is written.
+
+P1 costs one carve-out in the pure-core rule: `protocol.py` and `policy.py` may
+import `airgap.vocab`, and nothing else. Without it, the two modules forbidden
+from importing anything internal would have to redeclare the command and verdict
+enums inline — creating the third and fourth copies of exactly the vocabulary
+this principle exists to single-source. `vocab.py` has no I/O and no internal
+imports of its own, so the core stays a leaf plus one leaf, and testability, the
+thing purity was protecting, is untouched. `tests/test_layering.py` enforces the
+rule in this precise shape (AGENTS.md §5).
 
 **P2 — A fix to one document leaves its siblings stale.** The v1.1 lease was
 correct in `DESIGN.md` and incoherent against `spec/02`. **Mitigation:** the
@@ -128,15 +139,18 @@ are more attackable than a 32-character serial write"; a CLI reader is closer to
 the serial write than to the browser, so it does not merely relocate the exposure,
 it reduces it.
 
-Two consequences, and the second needs a human decision:
+**Q1 was raised here and has now been answered** (2026-08-23): either reader
+satisfies §9. `DESIGN.md` v1.3 introduces **full-fidelity reader** as a *role*
+with two implementations, notes that the terminal is the safer default, and no
+longer names the dashboard as the only one. Consequences, now settled:
 
-1. AIR-18 lands in M2; AIR-13 moves to M4 and becomes genuinely optional.
-2. **`DESIGN.md` §9 currently names the dashboard specifically.** If AIR-18 is
-   accepted as the high-risk reader, §9 needs to say "a full-fidelity reader
-   (terminal or dashboard)". That is a design-intent change, so per §10 it is
-   **not mine to make** — raised in §13 Q1.
+1. AIR-18 lands in M2. AIR-13 moves to M4 and is genuinely optional.
+2. AIR-14 depends on AIR-18, not AIR-13 — which is what the graph already said.
 
-Until Q1 is answered, treat high-risk as requiring AIR-13.
+Nothing in this plan is now conditional on Q1. The earlier draft asserted the
+graph one way and the prose the other ("until Q1 is answered, high-risk requires
+AIR-13") while §14 forbade any ticket depending on an unresolved contract
+question. That contradiction is closed.
 
 ---
 
@@ -161,23 +175,29 @@ should be removed.
 | **AIR-17** | AIR-6, AIR-8 | Needs `send()` to command the relay **and** the audit chain, because Rule 4a's defining property is *audit-before-act ordering*, which cannot be asserted without a real chain |
 | AIR-9 | AIR-17, AIR-11 | Broker orchestrates the interlock and the resolver |
 | AIR-10 | AIR-9 | MCP wraps the broker |
-| AIR-18 | AIR-9 | Reads `ui`-scope routes |
+| AIR-18 | AIR-9 | Reads `ui_ro`-scope routes |
 | AIR-13 | AIR-9 | Same |
 | AIR-14 | AIR-10, AIR-12, AIR-18 | Full chain, and the reader is how high-risk scenarios are asserted |
 | AIR-15 | AIR-14, AIR-5 | Runbook needs both a working system and real hardware |
 
 ### Waves
 
-The table below is **machine-verified**, not hand-maintained. `scripts/validate_plan.py`
-recomputes it from `tickets.yaml` and also checks that the graph is acyclic, every
-dependency resolves, every `reads` path exists, and every ticket has Context, Scope,
-Acceptance criteria and Verification sections. The first run of it caught this plan
-and the ticket file disagreeing about five dependency edges. Run it before dispatch
-and in CI.
+**Both tables in this section are machine-verified.** `scripts/validate_plan.py`
+parses them out of this file and compares them against `tickets.yaml` edge by
+edge and wave by wave, so drift here fails CI rather than surviving to dispatch.
+It also checks the graph is acyclic, every dependency resolves, every `reads` path
+exists, and every ticket has Context, Scope, Acceptance criteria and Verification
+sections. On a mismatch it prints the correct wave table to paste back.
 
 ```
 python scripts/validate_plan.py
 ```
+
+Its first run caught this plan and the ticket file disagreeing about five
+dependency edges. **At that point it did not yet read this file** — it validated
+`tickets.yaml` alone while the sentence above claimed the table was verified, so
+the table could have drifted with CI green. It reads both now, which is what
+makes the claim true rather than aspirational.
 
 
 | Wave | Tickets | Parallel | Notes |
@@ -223,6 +243,16 @@ wins.
 | AIR-12 warden | Low. Fails safe by construction — anything unparseable becomes `escalate` | `design` |
 | AIR-13 dashboard | Low functionally; **it is new attack surface** (I7) | Standard, but no approve route and CSP required |
 
+**On AIR-6 keeping `safety-critical` after the interlock left it.** What remains
+is the allowlist, the clamps, the rate limits, and the safe-state transition —
+and the last of those is Rule 5, the fail-closed path that every other guarantee
+degrades onto when the link dies. A silent bug there does not announce itself;
+it waits for the failure it was supposed to catch. The tier stays.
+
+It is still the **right first cut** if §13 Q2 forces one, because it is now the
+thinnest safety-critical ticket and its adversary has the least surface to attack.
+Cut its adversarial pass before AIR-8's, and neither before AIR-17's or AIR-11's.
+
 Two things are deliberately built earlier than their dependencies demand:
 
 - **AIR-16** could technically come after the codec. It comes before because P1
@@ -246,19 +276,38 @@ The spec lint fails when a command is added to `spec/01` without adding it to
 
 ### M1 — The interlock is provably correct
 **Tickets:** + AIR-2, 3, 4, 6, 7, 8, 17
-**Exit:** every test obligation in `spec/02` passes, each failure mode
-independently. Specifically: resolve-then-close succeeds (the v1.1 deadlock stays
-fixed); `relay_renew` is rejected on an open contact; the full cycle asserts in
-order; a mismatched `req` never closes; a replayed button closes at most once;
-`lease_expired` while unarmed touches no queued request.
+**Exit:** these two commands exit 0, with their full test lists pasted:
+
+```
+uv run pytest tests/test_supervisor.py -v      # AIR-6
+uv run pytest tests/test_interlock.py -v       # AIR-17
+```
+
+Between them they must cover both lists at the foot of `spec/02`, which that
+document now splits by ticket. Specifically: resolve-then-close succeeds (the
+v1.1 deadlock stays fixed); `relay_renew` acks `not_closed` on an open contact;
+the full cycle asserts in order; a mismatched `req` never closes; a replayed
+button closes at most once; `lease_expired` while unarmed touches no queued
+request; renewal **continues** past the verdict.
+
+> **This gate used to read "every test obligation in `spec/02` passes", which was
+> unscoreable.** `spec/02`'s test list still carried two v1.1 obligations that
+> Rules 4b and 4c had already replaced — renewal stopping on resolution, and
+> `lease_expired` denying pending requests. A session treating `spec/02` as truth
+> (as §10 instructs) would have written the deadlocked tests; a session treating
+> AIR-17 as truth would have failed the milestone. Nothing in this plan said
+> which won. `spec/02` is now v1.1 and its list is reconciled with its own rules;
+> the gate names commands instead of a document.
 
 ### M2 — MVP: the gate works end to end
 **Tickets:** + AIR-9, 10, 11, 12, 18
 **Exit:** an MCP client blocks on `request_approval`; a scripted approve returns
 `APPROVED: <reason>`; a Warden `auto_approve` on a policy-blocked tool returns
 `DENIED`; an empty policy table escalates everything while still honouring a
-Warden `block`; **no broker route resolves a request, for any `decided_by`**; the
-`agent` token cannot reach a `ui` route.
+Warden `block`; **no broker route resolves a request, for any `decided_by`**; and
+each of the three token scopes is confined to its own routes — `agent` cannot
+reach a `ui*` route, no `ui*` token can reach `POST /request_approval`, and
+`ui_ro` is refused by `PUT /policies/{pattern}`.
 
 ### M3 — Physically enforced
 **Tickets:** + AIR-5
@@ -279,7 +328,8 @@ narrative runs without intervention.
 | Layer | Scope | Where |
 |---|---|---|
 | **Spec lint** | Vocabulary in docs matches `vocab.py`, both directions | AIR-16, CI on every push |
-| **Layering** | Only `supervisor.py` imports `transport.py`; `protocol.py` and `policy.py` import nothing internal | AIR-1, CI |
+| **Layering** | Only `supervisor.py` imports `transport.py`; `protocol.py` and `policy.py` import nothing internal **except `airgap.vocab`**, which imports nothing internal at all | AIR-1, CI |
+| **Plan/ticket agreement** | §5's two tables match `tickets.yaml` edge for edge and wave for wave | `validate_plan.py`, CI |
 | **Unit** | Every module has a peer test file | Each ticket |
 | **Property** | Codec round-trip (`hypothesis`); policy never widens, asserted as an invariant over generated inputs | AIR-2, AIR-11 |
 | **Adversarial** | A second, independent session tries to defeat the protection | AIR-6, 8, 11, 17 |
@@ -306,11 +356,19 @@ happy-path test would have sailed past.
 
 **Session budget:** 17 agent tickets + 4 adversarial = 21 base, + ~25% rework ≈
 **26 sessions**. AIR-5 is human and consumes none. Peak concurrency is 3, set by
-the width of waves 3, 4 and 8 rather than by any tooling limit. Confirmed by
-`scripts/validate_plan.py`.
+the width of waves 3, 4 and 8 rather than by any tooling limit. The 21 is printed
+by `scripts/validate_plan.py`, not maintained by hand; §12 breaks it down by
+milestone and must sum to the same number.
 
-**Human gates:** 4 — one per milestone. The orchestrator reports and waits; it
-does not advance a milestone on its own.
+**Before dispatching anything**, `python scripts/validate_plan.py` must exit 0.
+Note the bare `python` — it is standard-library-only precisely so that it runs at
+wave 0, before AIR-1 has written `pyproject.toml` and before `uv sync` can
+install anything. Keep it that way.
+
+**Human gates:** 5 — one each at **M0, M1, M2, M3 and M4**. The orchestrator
+reports and waits; it does not advance a milestone on its own. (An earlier draft
+said "4 — one per milestone" while §7 listed five, which invites an orchestrator
+to silently skip one. There are five milestones and five gates.)
 
 ---
 
@@ -363,13 +421,19 @@ reported as such rather than worked around.
 Wall-clock is dominated by human review gates, not agent time, so estimates are
 given in sessions and gates rather than hours.
 
-| Milestone | Agent sessions | Human gates | Blocked by anything external |
-|---|---|---|---|
-| M0 | 2 | 1 | — |
-| M1 | 9 + 3 adversarial | 1 | — |
-| M2 | 5 + 1 adversarial | 1 | — |
-| M3 | 0 | 1 | **Parts delivery** |
-| M4 | 3 | 1 | M3 |
+| Milestone | New tickets | Agent sessions | Human gates | Blocked by anything external |
+|---|---|---|---|---|
+| M0 | AIR-1, 16 | 2 | 1 | — |
+| M1 | AIR-2, 3, 4, 6, 7, 8, 17 | 7 + 3 adversarial | 1 | — |
+| M2 | AIR-9, 10, 11, 12, 18 | 5 + 1 adversarial | 1 | — |
+| M3 | AIR-5 *(human)* | 0 | 1 | **Parts delivery** |
+| M4 | AIR-13, 14, 15 | 3 | 1 | M3 |
+| | **17 + 4 adversarial** | **21** | **5** | |
+
+The 17 agent tickets and 4 adversarial passes are the same 21 that
+`scripts/validate_plan.py` prints as the session budget; the two numbers are
+derived from the same graph and must stay equal. A previous draft put M1 at
+"9 + 3", double-counting M0's two tickets.
 
 M3 has zero agent sessions and is the most likely thing to slip, because it
 depends on shipping and a soldering iron rather than on tokens.
@@ -378,15 +442,16 @@ depends on shipping and a soldering iron rather than on tokens.
 
 ## 13. Open planning questions
 
-**Q1 — Does AIR-18 satisfy the high-risk reader requirement?**
-`DESIGN.md` §9 names the dashboard. If a terminal reader qualifies — and §4.3
-argues it is *better*, being a smaller attack surface — then §9 needs rewording
-and AIR-13 leaves the MVP path. **This is a design-intent change and therefore
-not mine to make (§10).** Until answered, high-risk requires AIR-13 and the
-dashboard sits on the M2 path.
+**Q1 — Does AIR-18 satisfy the high-risk reader requirement? — ANSWERED, yes.**
+Either reader qualifies. `DESIGN.md` v1.3 §4.2 and §9 now describe a
+full-fidelity **reader** as a role, with the terminal preferred where the
+deployment allows it, and `spec/03` v1.1 adds the `ui_ro` scope so the terminal
+reader cannot hold a policy-write token. AIR-18 is in M2; AIR-13 is in M4 and
+optional. Closed 2026-08-23.
 
 **Q2 — Is 26 sessions an acceptable envelope?** If not, the lever is the
-adversarial passes on AIR-6 and AIR-8. I would not cut them on AIR-17 or AIR-11.
+adversarial pass on AIR-6. I would not cut it on AIR-17, AIR-11 or AIR-8.
+See §6 for why AIR-6 keeps its tier but is the right thing to cut first.
 
 **Q3 — Should M1 include a hardware smoke test?** Currently all hardware is in
 M3. An early `ping` against a real board would surface wiring problems weeks
@@ -398,12 +463,16 @@ sooner, at the cost of needing parts earlier. Leaning yes if parts arrive early.
 
 Planning is done when all of these are true:
 
-- [ ] `python scripts/validate_plan.py` exits 0
-- [ ] Every ticket has a verification command that could exit 0 on a real machine
-- [ ] The dependency graph is acyclic and every edge has a stated reason (§5)
-- [ ] No ticket depends on an unresolved contract question
-- [ ] Q1 is answered, since it moves a ticket between milestones
-- [ ] A consistency sweep over `DESIGN.md` + `spec/` finds no contradictions
+- [x] `python scripts/validate_plan.py` exits 0 — **on a bare checkout**, with no
+      `pyproject.toml` and nothing installed
+- [x] Every ticket has a verification command that could exit 0 on a real machine
+- [x] The dependency graph is acyclic and every edge has a stated reason (§5)
+- [x] §5's tables agree with `tickets.yaml`, checked by the validator, not by eye
+- [x] No ticket depends on an unresolved contract question
+- [x] Q1 is answered, since it moves a ticket between milestones
+- [x] Every milestone gate is a command, not a document reference. M1's used to
+      name `spec/02`, whose own test list contradicted its own rules
+- [x] A consistency sweep over `DESIGN.md` + `spec/` finds no contradictions
 - [ ] The human has signed off
 
 Nothing in `DESIGN.md` §12's open items blocks this: Q5 (cut-short dwell), R7–R10

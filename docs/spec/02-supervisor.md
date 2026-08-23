@@ -1,4 +1,12 @@
-# Supervisor — FROZEN CONTRACT v1
+# Supervisor — FROZEN CONTRACT v1.1
+
+> **v1.1 (2026-08-23), plan review C1.** The test obligations at the foot of this
+> document still described v1.1-of-`DESIGN.md` behaviour that Rules 4b and 4c
+> had already replaced — renewal stopping on resolution, and `lease_expired`
+> denying pending requests. The v1.2 sweep fixed the rules and left the tests.
+> The list is now split by ticket and reconciled with the rules above it. The
+> command count also read "eight" against `spec/01`'s nine.
+
 
 The Supervisor is the only code permitted to hand a frame to the transport. It
 is deterministic: no LLM call, no network call, no randomness, no clock-dependent
@@ -18,7 +26,7 @@ Nothing else may import `transport` directly. This is enforced by a test
 
 ## Rule 1 — command allowlist
 
-Only the eight commands in [`01-serial-protocol.md`](01-serial-protocol.md) may
+Only the nine commands in [`01-serial-protocol.md`](01-serial-protocol.md) may
 be constructed. The Supervisor takes typed `Command` objects, never dicts and
 never strings. There is no passthrough, no `raw()`, no escape hatch. A request to
 send anything else raises `SupervisorRejection`.
@@ -178,22 +186,52 @@ class Supervisor:
 
 ## Test obligations
 
-`tests/test_supervisor.py` must cover, at minimum:
+Split across two test files because Rules 1–3 and 5 are separable from Rule 4.
+`AIR-6` implements the first list, `AIR-17` the second; **each list is the exit
+criterion for its own ticket**, and neither ticket is scored against the other's.
 
+### `tests/test_supervisor.py` — Rules 1, 2, 3, 5, 6
+
+- only typed `Command` objects are accepted: no dict, no string, no passthrough
 - every clamp boundary (`n=0`, `n=1`, `n=5`, `n=6`)
+- an `led.state` outside the enum is rejected, not coerced
+- `lcd` truncation to 16 chars and non-ASCII stripping
+- an `arm.req` not matching `^[0-9a-f]{8}$` is rejected
+- each of the four rate limits at its boundary
+- a rate-limited `relay` command is **rejected, never silently dropped**
+- tick starvation for 3001 ms enters the safe state
+- three consecutive unparseable lines enter the safe state
+- the safe state resolves pending requests with `verdict="link_lost"`, **not**
+  `denied` with a reason string
+- `relay(closed=False)` succeeds in every state including the safe state
+
+### `tests/test_interlock.py` — Rules 4, 4a, 4b, 4c
+
 - every one of the five relay-interlock conditions failing **independently**
+- **resolve-then-close succeeds:** condition 1 still passes after the request has
+  been resolved, because ARMED is Supervisor state and survives resolution. This
+  is the v1.1 deadlock (review 02 C1); without this test the rule is not covered
 - a `btn` event with a **mismatched** `req` never closes the relay
 - a `btn` event while disarmed never closes the relay
 - a replayed `btn` event (same one delivered twice) closes the relay at most once
-- tick starvation for 3001 ms enters the safe state
-- `relay(closed=False)` succeeds in every state including the safe state
+- a button **held across** `arm` is suppressed and cannot approve
 - an auto-approved request never closes the relay, however policy is configured
+- a request whose policy row does not set `relay_gated` sends **no relay command
+  at all**
 - a passing interlock writes the audit row **before** sending `relay(closed=True)`
   — assert the ordering, not just that both happened
-- the lease is renewed at 3 s intervals while closed, and renewal **stops**
-  immediately on resolution or safe state
-- a `lease_expired` event resolves any pending request as `denied` /
-  `lease_expired` and is audited
+- `relay_renew` is accepted while closed, acks `not_closed` while open, and can
+  never itself close an open contact
+- the lease is renewed at 3 s intervals while the contact is closed, and renewal
+  **continues after the verdict is returned**. It stops on dwell expiry, explicit
+  open, safe state, or disarm — **never on verdict** (Rule 4b). v1.1 said "stops
+  on resolution", which contradicts Rule 4a's ordering
+- the full Rule 4b cycle asserts **in order**, not merely that each step occurred
+- a `lease_expired` event **while ARMED mid-dwell** audits the fault and marks the
+  cycle incomplete, and **leaves the verdict `approved` unchanged** (Rule 4c)
+- a `lease_expired` event **while unarmed** is audited and changes nothing: it
+  must not resolve, deny, or disturb any queued request. v1.1 said it resolves
+  pending requests as `denied` / `lease_expired`, which Rule 4c forbids
 - the 2 s arming dead time holds: a second button press within it binds to
   nothing, and the next request does not arm until all buttons are observed
   released (`DESIGN.md` D5)

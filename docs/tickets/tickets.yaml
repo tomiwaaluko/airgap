@@ -26,26 +26,42 @@ tickets:
       ticket assumes `uv sync` and `uv run pytest` work.
 
       ## Scope
-      - `pyproject.toml` with the dependency set listed in AGENTS.md §5. Python 3.14.
+      - `pyproject.toml` with the **complete** dependency set listed in AGENTS.md
+        §5. Python 3.14. This list is frozen for the project: later tickets use
+        what is declared here rather than adding their own, so the set must
+        already include `hypothesis` (property tests in AIR-2 and AIR-11),
+        `freezegun` (AGENTS.md §6 forbids `sleep()` in tests) and `rich`
+        (AIR-18). A ticket that has to add one of these has found a defect in
+        this ticket, not a reason to edit `pyproject.toml` quietly.
       - Package skeleton at `src/airgap/` with `__init__.py` and empty typed stubs
         for the modules named in `docs/spec/00-overview.md`. Stubs raise
         `NotImplementedError`; they exist so imports resolve.
       - `tests/` with a peer file per module, each containing one passing
         placeholder so the suite is green.
       - `ruff` and `mypy` configured strictly. `mypy` in strict mode on `src/`.
-      - `tests/test_layering.py`: scans the source tree and fails if any module
-        other than `supervisor.py` imports `transport`. This enforces invariant 7.
-      - GitHub Actions workflow running lint, types, and tests on push.
+      - `tests/test_layering.py`, enforcing two rules:
+        1. no module other than `supervisor.py` imports `transport` (invariant 7);
+        2. the **pure core** — `protocol.py` and `policy.py` — imports nothing
+           internal except `airgap.vocab`, and `vocab.py` imports nothing internal
+           at all. See AGENTS.md §5 for why `vocab` is the one permitted edge.
+      - CI runs `python scripts/validate_plan.py` alongside lint, types and tests.
+        **It must be invoked as bare `python`, not `uv run`** — it is the
+        pre-dispatch gate and is standard-library-only by design so that it works
+        before this ticket exists. Do not add PyYAML to make it prettier.
+      - GitHub Actions workflow running all four on push.
       - `.gitignore` covering `.venv/`, `__pycache__/`, `*.db`, `.env`.
 
       ## Acceptance criteria
       - `uv sync` succeeds from a clean clone.
       - `uv run pytest`, `uv run ruff check .`, `uv run mypy src/` all exit 0.
+      - `python scripts/validate_plan.py` exits 0 and is wired into CI.
       - `tests/test_layering.py` fails if you temporarily add
         `import airgap.transport` to `broker.py` (try it, then revert).
+      - It also fails if you add `import airgap.transport` to `policy.py`, and
+        **passes** with `import airgap.vocab` there. Demonstrate both.
 
       ## Verification
-      `uv sync && uv run ruff check . && uv run mypy src/ && uv run pytest`
+      `uv sync && uv run ruff check . && uv run mypy src/ && uv run pytest && python scripts/validate_plan.py`
 
   - id: AIR-2
     title: "Serial protocol codec"
@@ -73,7 +89,12 @@ tickets:
       - Fuzz test: `decode()` returns `None` and does not raise for 1000 random
         byte strings including truncated JSON, embedded nulls, and non-UTF-8.
       - `lcd` truncation to 16 chars happens here, host-side, per the spec.
-      - No imports from anywhere else in `airgap`. No I/O.
+      - **Command names, error codes and event names come from `airgap.vocab`.
+        Do not redeclare them here** — a second definition is the exact drift
+        AIR-16 exists to prevent (`PLAN.md` P1).
+      - `airgap.vocab` is the **only** internal import permitted, and there is no
+        I/O. `tests/test_layering.py` enforces both. This is the pure-core rule
+        in AGENTS.md §5; the vocab edge is deliberate, not a loophole.
 
       ## Verification
       `uv run pytest tests/test_protocol.py -v`
@@ -209,8 +230,10 @@ tickets:
       stub the interlock in a way AIR-17 has to unpick.
 
       ## Acceptance criteria
-      The non-interlock test obligations from `docs/spec/02-supervisor.md`, each
-      failure mode tested **independently**:
+      Exactly the list under **"`tests/test_supervisor.py` -- Rules 1, 2, 3, 5,
+      6"** at the foot of `docs/spec/02-supervisor.md`. That document splits its
+      test obligations by ticket; **you are scored against your list and not
+      against AIR-17's.** Each failure mode tested **independently**:
       - all clamp boundaries (`n=0`, `n=1`, `n=5`, `n=6`)
       - `led.state` outside the four-value enum is rejected, not coerced
       - `lcd` truncation to 16 chars and non-ASCII stripping
@@ -298,8 +321,13 @@ tickets:
 
       ## Scope
       - FastAPI app in `src/airgap/broker.py` with `/request_approval`,
-        `/pending`, `/health`, and the `ui`-scope read routes. **There is no
-        `/decide` endpoint** -- every verdict is produced in-process.
+        `/pending`, `/health`, and the read routes. **There is no `/decide`
+        endpoint** -- every verdict is produced in-process.
+      - **Three token scopes**, per `docs/spec/03-broker-api.md`: `agent`
+        (`POST /request_approval` only), `ui` (reads + `PUT /policies/{pattern}`),
+        and `ui_ro` (reads only, no write route at all, rejects `Origin`). A
+        `ui_ro` token presented to `PUT /policies/{pattern}` gets `403` -- the
+        capability is absent from the scope, not merely unused.
       - Requests park on an `asyncio.Event`. Exactly one armed at a time; others
         queue FIFO with their callers still blocked.
       - 30-minute configurable expiry resolving to `expired`, relay open.
@@ -316,11 +344,13 @@ tickets:
         unblock a consent-channel call. The endpoint is gone, not hardened. This
         is the single most important assertion in this ticket.
       - **Token scopes**: `agent` reaches only `POST /request_approval`; `ui`
-        reaches only reads and policy edits. Assert neither reaches the other's
-        routes.
-      - Broker binds 127.0.0.1. `/request_approval` rejects any request carrying
-        an `Origin` header; `ui` routes allowlist it instead, since the dashboard
-        is a browser and does send one.
+        reaches reads and policy edits; `ui_ro` reaches reads only. Assert that
+        **no scope reaches another's routes** -- all six directions, not just the
+        `agent`/`ui` pair -- and specifically that `ui_ro` gets `403` from
+        `PUT /policies/{pattern}`.
+      - Broker binds 127.0.0.1. `/request_approval` and `ui_ro` routes reject any
+        request carrying an `Origin` header; `ui` routes allowlist it instead,
+        since the dashboard is a browser and does send one.
       - Audit rows are written **before** callers are released and before the
         relay moves. Assert the ordering, not merely that both occurred.
       - Two concurrent requests: the second stays blocked while the first is
@@ -413,7 +443,15 @@ tickets:
       ## Scope
       - `src/airgap/warden.py` using the Anthropic Messages API with tool use.
       - Read-only tools: `classify_risk`, `check_policy`, `search_decision_history`,
-        `check_injection_signature`, `read_autonomy_dial`.
+        `read_autonomy_dial`.
+      - **No injection-screening tool.** v1.1 had `check_injection_signature`;
+        `DESIGN.md` T2 demoted LLM-side injection screening from a control to
+        "not a control" — an LLM asked whether text is malicious is subject to
+        the same text. Shipping the tool anyway would advertise a defence the
+        design explicitly withdrew, and the next reader would count on it.
+        Injection is contained by the Warden's output being a *proposal* the
+        policy engine can only narrow, which is a structural bound rather than a
+        judgment call.
       - Writes a `warden_assessments` row for every request it sees.
       - Structured output; a malformed or missing response falls back to
         `escalate`, never to `auto_approve`.
@@ -481,9 +519,14 @@ tickets:
       stubbed LLM. No hardware, no live API.
 
       ## Acceptance criteria
-      Each of these end to end:
-      - happy path: request -> escalate -> scripted approve button -> relay closes
-        -> tool call returns APPROVED
+      Each of these end to end. **Scenario order matters**: the first one is the
+      one everybody copies when adding the nineteenth, so it must model the
+      common case, not the exotic one.
+      - **consent-channel happy path (the default shape):** request -> escalate ->
+        scripted approve button -> tool call returns APPROVED, and **no relay
+        command is sent at all**. Most actions are consent channel (`DESIGN.md`
+        §4.4, D12); a `DROP TABLE` does not close a contact. Assert the absence
+        of the relay command, do not merely omit it
       - deny path: relay never closes, tool returns DENIED
       - policy block overrides a Warden auto-approve
       - **empty policy table**: every request escalates; nothing auto-approves
@@ -538,7 +581,7 @@ tickets:
     title: "Vocabulary single-source and spec lint"
     tier: design
     depends_on: [AIR-1]
-    reads: ["docs/PLAN.md", "docs/spec/01-serial-protocol.md", "docs/spec/05-data-model.md"]
+    reads: ["docs/PLAN.md", "docs/spec/01-serial-protocol.md", "docs/spec/02-supervisor.md", "docs/spec/05-data-model.md"]
     body: |
       ## Context
       Two design reviews found the same class of defect repeatedly: the same word
@@ -557,22 +600,43 @@ tickets:
         verdicts, `decided_by` values, audit event names, policy actions. Python
         StrEnum. Nothing else in the codebase may define these inline.
       - `tests/test_spec_lint.py`: parses the markdown tables and fenced JSON in
-        `docs/spec/01-serial-protocol.md` and `docs/spec/05-data-model.md`,
-        extracts the vocabularies, and asserts **set equality in both
-        directions** against `vocab.py`. A term in the spec but not the code
-        fails. A term in the code but not the spec also fails -- one-way checking
-        is how dead vocabulary accumulates.
-      - `tests/test_no_stale_refs.py`: asserts no document outside `docs/reviews/`
-        references a removed concept. Seed it with `/decide`, removed in v1.2.
+        `docs/spec/01-serial-protocol.md`, **`docs/spec/02-supervisor.md`** and
+        `docs/spec/05-data-model.md`, extracts the vocabularies, and asserts
+        **set equality in both directions** against `vocab.py`. A term in the
+        spec but not the code fails. A term in the code but not the spec also
+        fails -- one-way checking is how dead vocabulary accumulates.
+
+        **`spec/02` is not optional coverage, it is the point.** It is where the
+        drift has actually happened twice: it said "the eight commands" while
+        `spec/01` listed nine, and its test obligations contradicted its own
+        Rules 4b and 4c. A lint whose coverage map excludes the document that
+        drifts is decoration. Check at least: the command count and names, the
+        verdict names, and the `decided_by` values.
+      - `tests/test_no_stale_refs.py`: asserts no **implementation** reintroduces
+        a removed concept. Scope it to `src/` and `tests/`, plus one structural
+        assertion that `docs/spec/03-broker-api.md` declares no route table row
+        for the term. Seed it with `/decide`, removed in v1.2.
+
+        **Scope it that way deliberately.** The obvious version -- "fail if the
+        string appears in any non-review doc" -- fails on the frozen contracts,
+        `AGENTS.md` and this plan, all of which name `/decide` in order to say it
+        is gone. Since §10 forbids an agent editing `docs/spec/`, that lint would
+        be unfixable from inside the ticket and wave 2 could never merge. Prose
+        explaining a removal is the documentation working; a route in `src/` is
+        the regression. Lint the second.
       - Wire both into CI.
 
       ## Acceptance criteria
       - Adding a command to the `spec/01` table without adding it to `vocab.py`
         fails the lint. **Demonstrate it**: make the edit, show the failure,
-        revert.
+        revert. Use `spec/01`, which is the safe one to touch transiently -- do
+        not demonstrate against `spec/02`.
+      - Changing `spec/02`'s "the nine commands" to "eight" fails the lint. This
+        is a real historical defect; the lint must catch it.
       - Removing a verdict from `vocab.py` that `spec/05` still lists fails.
       - Adding a term to `vocab.py` absent from the specs also fails.
-      - Reintroducing the string `/decide` into any non-review doc fails.
+      - Adding `@app.post("/decide")` to `src/airgap/broker.py` fails.
+      - A markdown sentence stating that `/decide` was removed does **not** fail.
       - Failure output names the term and both locations, not just "sets differ".
 
       ## Out of scope
@@ -616,7 +680,14 @@ tickets:
       - Rule 4c: `lease_expired` scoped to the armed request.
 
       ## Acceptance criteria
-      Each tested independently. A happy-path test is not coverage here.
+      Exactly the list under **"`tests/test_interlock.py` -- Rules 4, 4a, 4b,
+      4c"** at the foot of `docs/spec/02-supervisor.md`, reproduced here. Each
+      tested independently; a happy-path test is not coverage.
+
+      Note that spec/02 v1.1 fixed that list. Before v1.1 it demanded renewal
+      stop on resolution and `lease_expired` deny pending requests -- both of
+      which Rules 4b and 4c forbid. **If you are working from a cached copy that
+      still says either thing, stop and escalate (§10); do not implement it.**
       - each of the five interlock conditions failing **on its own**
       - **resolve-then-close succeeds** -- condition 1 passes after the request is
         resolved, because the Supervisor is still ARMED. This is the v1.1
@@ -654,7 +725,13 @@ tickets:
       critical path (`PLAN.md` section 4.3).
 
       ## Scope
-      - `airgap watch` console entry point. Long-running, reads `ui`-scope routes.
+      - `airgap watch` console entry point. Long-running, holds a **`ui_ro`**
+        token and reads `GET /pending`, `/audit`, `/policies`.
+
+        **Not `ui`.** The `ui` scope may `PUT /policies/{pattern}`, and this is a
+        long-running local process whose environment a co-resident agent can
+        often read. A reader holding a policy-write token hands N-T8 to the actor
+        (`spec/03` token scopes, `DESIGN.md` §11).
       - Shows the pending request in full: actor, tool name, **complete**
         `tool_args`, justification, Warden risk class and reasoning, the policy
         row matched, dial level, elapsed time, and the short code on the LCD.
@@ -674,7 +751,13 @@ tickets:
         fixture.
       - **No approve capability**: no keybinding, no route, no token scope that
         resolves a request. Approval is physical, always.
-      - Works with the `ui` token only; the `agent` token is rejected.
+      - Works with a `ui_ro` token; the `agent` token is rejected.
+      - **The reader issues no non-GET request, ever.** Assert it at the HTTP
+        client layer, not by inspection -- a test that drives the full reader and
+        fails on any method other than `GET`.
+      - Presenting the reader's own token to `PUT /policies/{pattern}` returns
+        `403`. The capability is absent from the token, not merely unused by the
+        code.
 
       ## Verification
       `uv run pytest tests/test_watch.py -v`

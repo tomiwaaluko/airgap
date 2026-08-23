@@ -1,8 +1,9 @@
 # Airgap — Design Specification
 
-**Version:** 1.2
+**Version:** 1.3
 **Date:** 2026-08-23
-**Status:** revised after design reviews 01 and 02 — see [`reviews/`](reviews/)
+**Status:** revised after design reviews 01 and 02 and the plan review — see
+[`reviews/`](reviews/)
 **Author:** Tomiwa Aluko
 
 ---
@@ -130,25 +131,36 @@ not mistake it for a trust boundary.)
 | **T8** | Broker process killed while the relay is closed | Firmware relay **lease**: the contact opens if the host does not renew within 10 s (D8) | Always |
 | **T9** | Agent escalates its own autonomy level | The dial is a potentiometer. Readable, not writable. No code path exists to change it | Always |
 
-**On T1, truncation, and the cost of the dashboard cross-reference.** The LCD is
-16×2. `users_production` and `users_prod_bak` do not fit and do not disambiguate
-when truncated. So the LCD is an **alert**, not the authoritative description: a
-`high`-risk request shows a short code matching a dashboard row, and the human
-reads the real action there (§9).
+**On T1, truncation, and the cost of the full-fidelity cross-reference.** The LCD
+is 16×2. `users_production` and `users_prod_bak` do not fit and do not
+disambiguate when truncated. So the LCD is an **alert**, not the authoritative
+description: a `high`-risk request shows a short code matching a row in a
+**full-fidelity reader**, and the human reads the real action there (§9).
+
+A full-fidelity reader is a role, not a product. Two implementations satisfy it —
+the `airgap watch` terminal reader and the web dashboard — and either is
+sufficient on its own. The requirement is the *fidelity*, not the surface.
 
 That is a real trade and review 02 named it (finding I7). Being precise about what
 it costs, because the finding's framing slightly overstates it:
 
 - It is **not** a new *trust* dependency. The LCD was already Z2-rendered — N-T2
   has always said the host can lie about what you are approving. Moving the
-  authoritative text to the dashboard does not add a zone.
-- It **is** a new *attack surface* inside that zone. A browser, a template, and a
-  rendering path are more attackable than a 32-character serial write. XSS, or a
-  stale row whose short code happens to match, is a T1 bypass that the LCD-only
-  design did not have.
+  authoritative text to a reader does not add a zone.
+- It **is** a new *attack surface* inside that zone, and **how much** depends on
+  which reader. A browser, a template, and a rendering path are more attackable
+  than a 32-character serial write: XSS, or a stale row whose short code happens
+  to match, is a T1 bypass the LCD-only design did not have. A terminal reader
+  has neither a template nor a script engine, so it sits far closer to the serial
+  write than to the browser. **Prefer the terminal reader where the deployment
+  allows it**; the exposure this bullet describes is then largely avoided rather
+  than relocated. Its own equivalent risk is ANSI-escape injection through
+  attacker-controlled strings, which is why that is an explicit acceptance
+  criterion on the reader rather than an afterthought.
 - The short code is therefore generated per-arm and includes a nonce, so a stale
-  dashboard row cannot match a live request. That closes the stale-row case; it
-  does not close XSS, which is bounded only by N-T2.
+  row in either reader cannot match a live request. That closes the stale-row
+  case; it does not close XSS in the browser reader, which is bounded only by
+  N-T2.
 
 §2 rejected in-band *approval*. The press is still physical, so that still holds.
 What has moved in-band is the *description*, which was never out-of-band to begin
@@ -167,7 +179,7 @@ Stating these plainly is what separates this from security theatre.
 | **N-T5** | Malicious firmware flashed to the device | Supply chain is out of scope | Flash it yourself; verify against `firmware/` |
 | **N-T6** | The action is approved and *is* harmful — the human was simply wrong | Airgap conveys the decision, it does not make it | Warden surfaces blast radius; history shows patterns |
 | **N-T7** | **An auto-approved action is never seen by a human at all** | That is what auto-approval *means*. T2's "it cannot make a human press" does not apply when no press occurs | Auto-approval is bounded by the policy envelope, is off by default (§12 Q2), and can never close the relay (D12) |
-| **N-T8** | **The policy table is software-writable.** The dashboard can widen `db.drop_*` to `auto_approve` | The policy table lives in Z2 and inherits Z2's trust. The dial resists self-escalation; the policy table does not | Policy edits are audited. A genuine fix requires the dial to gate widening edits — noted in §12 R7 |
+| **N-T8** | **The policy table is software-writable.** Anything holding the `ui` token — the dashboard — can widen `db.drop_*` to `auto_approve` | The policy table lives in Z2 and inherits Z2's trust. The dial resists self-escalation; the policy table does not | Policy edits are audited, and the write capability is confined to the one scope that needs it: `ui`, not `ui_ro`. A genuine fix requires the dial to gate widening edits — noted in §12 R7 |
 
 ### 4.4 The distinction that matters: consent channel vs enforcement boundary
 
@@ -617,7 +629,10 @@ Principles:
   worse than none.
 - **High-risk requests do not put the action on the LCD.** 16 characters cannot
   distinguish `users_production` from `users_prod_bak`. They show a short code
-  matching the dashboard row, and the human reads the real thing there.
+  matching a row in a **full-fidelity reader** — the `airgap watch` terminal or
+  the web dashboard, either one — and the human reads the real thing there. The
+  requirement is that *some* full-fidelity surface is open, not that it is the
+  browser one; §4.2 explains why the terminal is the safer default.
 - **The dial level is visible when idle**, so the operator knows their posture.
 
 **LCD is optional hardware** (spec/04). Every state above must remain
@@ -660,15 +675,23 @@ Arduino is on USB. The only outbound call is to the Anthropic API for the Warden
   ├── broker            127.0.0.1 only, never 0.0.0.0
   │                     NO endpoint resolves a request. /decide does not exist.
   │                     tokens are scoped: agent -> request_approval only,
-  │                                        ui    -> reads + policy edits only
+  │                                        ui    -> reads + policy edits,
+  │                                        ui_ro -> reads only, no writes at all
   ├── supervisor        in-process with the broker, owns the serial port,
   │                     and is the ONLY producer of decided_by=human  (D11)
   ├── postgres          localhost
+  ├── airgap watch      terminal reader, ui_ro scope — read only; NO approve control
   ├── web dashboard     127.0.0.1 — read + policy edit; NO approve control
   └── USB ──────────────► Arduino UNO ──► relay ──► controlled load
 ```
 
-The dashboard has **no approve button and no approve endpoint to call** — not a
+Either reader satisfies §9's full-fidelity requirement; neither is required to
+run alongside the other. `airgap watch` holds `ui_ro`, which cannot write the
+policy table — a long-running CLI shares a trust domain with any co-resident
+agent that can read its environment, and N-T8 is quite bad enough without handing
+it a token.
+
+Neither reader has **an approve button or an approve endpoint to call** — not a
 rejected one, an absent one. Adding either would reintroduce exactly the software
 approval path D11 removes.
 
@@ -687,7 +710,7 @@ deployment first — nginx defaults `proxy_read_timeout` to 60 s.
 | R1 | Blocking calls unverified past 150 s | Long unattended approvals may fail | Re-run the spike at 30 min before relying on it. Expiry bounds exposure |
 | R2 | Auto-approval erodes the gate's value | Fatigue returns in a new form | Ships disabled (Q2). Weekly digest of what was auto-approved |
 | R3 | Relay fails welded (F10) | Enforcement silently absent | Documented; monitored-contact relay if it ever matters |
-| R4 | LCD text is host-authored (N-T2) | Human approves a misrepresented action | Accepted and stated. High-risk uses a dashboard cross-reference (§9) |
+| R4 | LCD text is host-authored (N-T2) | Human approves a misrepresented action | Accepted and stated. High-risk uses a full-fidelity reader cross-reference (§9) |
 | R5 | Only the Python MCP SDK tested | Another client may time out | Fallback design documented, not built |
 | R6 | Single armed request bottlenecks | Queue grows while human is away | Expiry drains it; dashboard alerts above depth 5 |
 | R7 | **Policy table is software-writable (N-T8)** | Z2 compromise can widen authority | v1 audits policy edits. Gating widening edits behind the dial is the real fix; not in v1 |
@@ -733,11 +756,14 @@ outside it. Specifically:
 
 - T1 is **not** claimed to be demonstrable in general, because N-T2 makes an
   honest demonstration impossible. What is tested: a high-risk request never puts
-  a truncatable identifier on the LCD, and the dashboard carries the full action.
+  a truncatable identifier on the LCD, and a full-fidelity reader carries the
+  full action.
 - T3's test must enumerate every route the broker exposes and assert that **none
   of them resolves a request**, for any `decided_by` value — including `policy`,
-  which v1.1 still allowed over HTTP. It must also assert that a caller holding
-  the `agent` token cannot reach a `ui` route and vice versa. Testing the GPIO
+  which v1.1 still allowed over HTTP. It must also assert that each of the three
+  token scopes is confined to its own routes: `agent` cannot reach a `ui*` route,
+  no `ui*` token can reach `POST /request_approval`, and `ui_ro` is rejected by
+  `PUT /policies/{pattern}`. Testing the GPIO
   path alone would pass while the hole stayed open.
 - A test must assert Rule 4, 4a, 4b and NF11 **together**: resolve, then close,
   then renew past 10 s, then dwell out, then open. v1.1's wording made that test

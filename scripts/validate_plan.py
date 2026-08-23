@@ -1,24 +1,37 @@
-"""Validate the ticket graph and emit the wave schedule.
-
-Run before dispatching anything, and in CI. This exists because the first time it
-was run it caught PLAN.md and tickets.yaml disagreeing about five dependency
-edges -- the plan had been revised and the ticket file had not.
+"""Validate the ticket graph, and check PLAN.md still agrees with it.
 
     python scripts/validate_plan.py
 
-Exit 0 if the graph is sound. Exit 1 with a specific complaint otherwise.
+Exit 0 if the plan is sound. Exit 1 with a specific complaint otherwise.
+
+Two things to know before editing this file.
+
+**Standard library only, deliberately.** This is the pre-dispatch gate named in
+`PLAN.md` section 9 and `ORCHESTRATOR_PROMPT.md` step 0, which means it runs on a
+bare checkout -- before AIR-1 has created `pyproject.toml`, and therefore before
+`uv sync` can install anything. An earlier version imported PyYAML and could not
+run at the moment it was most needed. Do not reintroduce that. The YAML subset
+parser below exists for exactly this reason; when PyYAML *is* importable it is
+used as a cross-check, never as the primary path.
+
+**It reads PLAN.md, not just tickets.yaml.** The first version validated the
+ticket file alone while the plan claimed its tables were "machine-verified" --
+so the tables could drift and CI would stay green. That is the P2 failure mode
+the plan is named after. Both tables in section 5 are now checked against the
+graph.
 """
 
 from __future__ import annotations
 
 import functools
+import re
 import sys
 from pathlib import Path
 
-import yaml
-
 ROOT = Path(__file__).resolve().parent.parent
 TICKETS = ROOT / "docs" / "tickets" / "tickets.yaml"
+PLAN = ROOT / "docs" / "PLAN.md"
+
 TIERS = {"mechanical", "standard", "design", "safety-critical"}
 REQUIRED_SECTIONS = ("## Context", "## Scope", "## Acceptance criteria", "## Verification")
 
@@ -29,16 +42,211 @@ def fail(msg: str) -> None:
     problems.append(msg)
 
 
-def main() -> int:
-    data = yaml.safe_load(TICKETS.read_text(encoding="utf-8"))
-    tickets = data["tickets"]
-    by_id = {t["id"]: t for t in tickets}
+# --------------------------------------------------------------------------
+# YAML subset parser
+# --------------------------------------------------------------------------
+# Handles exactly what tickets.yaml uses and rejects everything else loudly:
+#   tickets:
+#     - id: AIR-1
+#       tier: mechanical
+#       depends_on: [AIR-2, AIR-3]
+#       human: true
+#       reads: ["a/b.md"]
+#       body: |
+#         free text
+#
+# A parser that silently mishandles a construct is worse than one that refuses
+# it, because the graph it produces would look plausible.
 
+
+class ParseError(Exception):
+    pass
+
+
+def _scalar(raw: str) -> object:
+    raw = raw.strip()
+    if raw.startswith("[") and raw.endswith("]"):
+        inner = raw[1:-1].strip()
+        if not inner:
+            return []
+        return [_scalar(part) for part in inner.split(",")]
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'":
+        return raw[1:-1]
+    if raw in ("true", "false"):
+        return raw == "true"
+    if raw == "null" or raw == "~":
+        return None
+    return raw
+
+
+def parse_tickets(text: str) -> list[dict]:
+    lines = text.splitlines()
+    tickets: list[dict] = []
+    current: dict | None = None
+    i = 0
+    seen_root = False
+
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        if not stripped or stripped.startswith("#"):
+            i += 1
+            continue
+
+        indent = len(line) - len(line.lstrip())
+
+        if indent == 0:
+            if stripped == "tickets:":
+                seen_root = True
+                i += 1
+                continue
+            # Top-level scalar metadata (version, project, team_key). Recorded
+            # nowhere; it exists for the orchestrator, not for the graph.
+            if ":" in stripped and not seen_root:
+                i += 1
+                continue
+            raise ParseError(f"line {i + 1}: unexpected content at column 0: {stripped!r}")
+
+        if not seen_root:
+            raise ParseError(f"line {i + 1}: content before `tickets:`")
+
+        if stripped.startswith("- "):
+            if indent != 2:
+                raise ParseError(f"line {i + 1}: list item at indent {indent}, expected 2")
+            current = {}
+            tickets.append(current)
+            stripped = stripped[2:]
+            indent = 4
+        elif indent != 4:
+            raise ParseError(f"line {i + 1}: key at indent {indent}, expected 4")
+
+        if current is None:
+            raise ParseError(f"line {i + 1}: key outside any list item")
+
+        if ":" not in stripped:
+            raise ParseError(f"line {i + 1}: not a `key: value` pair -- {stripped!r}")
+
+        key, _, value = stripped.partition(":")
+        key = key.strip()
+        value = value.strip()
+
+        if value in ("|", "|-", ">"):
+            if value == ">":
+                raise ParseError(f"line {i + 1}: folded scalars (`>`) are not supported; use `|`")
+            body: list[str] = []
+            i += 1
+            while i < len(lines):
+                nxt = lines[i]
+                if nxt.strip() and (len(nxt) - len(nxt.lstrip())) < 6:
+                    break
+                body.append(nxt[6:] if len(nxt) >= 6 else "")
+                i += 1
+            while body and not body[-1].strip():
+                body.pop()
+            current[key] = "\n".join(body)
+            continue
+
+        current[key] = _scalar(value)
+        i += 1
+
+    if not seen_root:
+        raise ParseError("no `tickets:` key found")
+    return tickets
+
+
+def cross_check_with_pyyaml(text: str, parsed: list[dict]) -> None:
+    """If PyYAML happens to be installed, confirm the hand parser agrees with it.
+
+    Never required. This is what stops the parser above from quietly drifting
+    away from real YAML as tickets.yaml grows.
+    """
+    try:
+        import yaml  # type: ignore[import-not-found]
+    except ImportError:
+        return
+    reference = yaml.safe_load(text)["tickets"]
+    if len(reference) != len(parsed):
+        fail(f"parser disagrees with PyYAML: {len(parsed)} tickets vs {len(reference)}")
+        return
+    for ref, got in zip(reference, parsed):
+        for key in set(ref) | set(got):
+            a, b = ref.get(key), got.get(key)
+            if isinstance(a, str) and isinstance(b, str):
+                a, b = a.strip(), b.strip()
+            if a != b:
+                fail(f"parser disagrees with PyYAML on {ref.get('id')}.{key}")
+
+
+# --------------------------------------------------------------------------
+# PLAN.md tables
+# --------------------------------------------------------------------------
+
+TICKET_RE = re.compile(r"AIR-\d+")
+
+
+def _row_cells(line: str) -> list[str]:
+    return [c.strip() for c in line.strip().strip("|").split("|")]
+
+
+def plan_edges(plan: str) -> dict[str, set[str]] | None:
+    """Parse the section 5 'Ticket | Depends on | Because' table."""
+    edges: dict[str, set[str]] = {}
+    in_table = False
+    for line in plan.splitlines():
+        cells = _row_cells(line) if line.strip().startswith("|") else None
+        if cells and len(cells) == 3 and cells[0] == "Ticket" and cells[1] == "Depends on":
+            in_table = True
+            continue
+        if in_table:
+            if not cells or len(cells) != 3:
+                break
+            if set(cells[0]) <= set("-: "):
+                continue
+            ids = TICKET_RE.findall(cells[0])
+            if len(ids) != 1:
+                fail(f"PLAN.md section 5 dependency row names {len(ids)} tickets: {cells[0]!r}")
+                continue
+            edges[ids[0]] = set(TICKET_RE.findall(cells[1]))
+    return edges or None
+
+
+def plan_waves(plan: str) -> list[list[str]] | None:
+    """Parse the section 5 'Wave | Tickets | Parallel' table."""
+    waves: list[list[str]] = []
+    in_table = False
+    for line in plan.splitlines():
+        cells = _row_cells(line) if line.strip().startswith("|") else None
+        if cells and len(cells) >= 3 and cells[0] == "Wave" and cells[1] == "Tickets":
+            in_table = True
+            continue
+        if in_table:
+            if not cells or len(cells) < 3:
+                break
+            if set(cells[0]) <= set("-: "):
+                continue
+            waves.append(sorted(TICKET_RE.findall(cells[1])))
+    return waves or None
+
+
+# --------------------------------------------------------------------------
+
+
+def main() -> int:
+    try:
+        tickets = parse_tickets(TICKETS.read_text(encoding="utf-8"))
+    except ParseError as exc:
+        print(f"PLAN VALIDATION FAILED\n\n  - tickets.yaml: {exc}", file=sys.stderr)
+        return 1
+
+    cross_check_with_pyyaml(TICKETS.read_text(encoding="utf-8"), tickets)
+
+    by_id = {t["id"]: t for t in tickets}
     if len(by_id) != len(tickets):
         fail("duplicate ticket ids")
 
     for t in tickets:
-        tid = t["id"]
+        tid = t.get("id", "<no id>")
         if t.get("tier") not in TIERS:
             fail(f"{tid}: tier {t.get('tier')!r} not in {sorted(TIERS)}")
         if not t.get("reads"):
@@ -57,8 +265,9 @@ def main() -> int:
     if problems:
         return report()
 
-    # ---- waves ----
     deps = {t["id"]: list(t.get("depends_on", [])) for t in tickets}
+
+    # ---- waves ----
     waves: list[list[str]] = []
     done: set[str] = set()
     remaining = set(deps)
@@ -70,6 +279,31 @@ def main() -> int:
         waves.append(ready)
         done |= set(ready)
         remaining -= set(ready)
+
+    # ---- PLAN.md must agree ----
+    plan = PLAN.read_text(encoding="utf-8")
+
+    stated_edges = plan_edges(plan)
+    if stated_edges is None:
+        fail("PLAN.md: could not find the section 5 dependency table")
+    else:
+        for tid in sorted(set(stated_edges) | set(deps)):
+            want, got = set(deps.get(tid, [])), stated_edges.get(tid)
+            if got is None:
+                fail(f"PLAN.md section 5 has no dependency row for {tid}")
+            elif want != got:
+                fail(
+                    f"{tid}: tickets.yaml depends on {sorted(want) or 'nothing'}, "
+                    f"PLAN.md section 5 says {sorted(got) or 'nothing'}"
+                )
+        for tid in sorted(set(stated_edges) - set(deps)):
+            fail(f"PLAN.md section 5 has a row for {tid}, which is not in tickets.yaml")
+
+    stated_waves = plan_waves(plan)
+    if stated_waves is None:
+        fail("PLAN.md: could not find the section 5 wave table")
+    elif stated_waves != waves:
+        fail("PLAN.md wave table does not match the computed schedule (correct table printed below)")
 
     @functools.lru_cache(maxsize=None)
     def depth(node: str) -> int:
@@ -84,12 +318,20 @@ def main() -> int:
     human = {t["id"] for t in tickets if t.get("human")}
     critical_tier = {t["id"] for t in tickets if t["tier"] == "safety-critical"}
 
-    print(f"{len(tickets)} tickets, graph is acyclic\n")
+    agent_peak = max(len([w for w in wave if w not in human]) for wave in waves)
+
+    if problems:
+        print("\ncomputed wave table:\n", file=sys.stderr)
+        for i, wave in enumerate(waves, 1):
+            marks = ", ".join(w + (" (human)" if w in human else "") for w in wave)
+            agents = len([w for w in wave if w not in human])
+            print(f"| {i} | {marks} | {agents} | |", file=sys.stderr)
+        return report()
+
+    print(f"{len(tickets)} tickets, graph is acyclic")
+    print("PLAN.md section 5 agrees with tickets.yaml on every edge and every wave\n")
     print("WAVES")
-    agent_peak = 0
     for i, wave in enumerate(waves, 1):
-        agents = [w for w in wave if w not in human]
-        agent_peak = max(agent_peak, len(agents))
         marks = ", ".join(w + (" (human)" if w in human else "") for w in wave)
         print(f"  {i:>2}: {marks}")
     print(f"\ndepth: {len(waves)} waves")

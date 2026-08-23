@@ -1,8 +1,8 @@
 # Codex Orchestrator — Start-Off Prompt
 
-**Rewritten for `PLAN.md` v1.0 / `DESIGN.md` v1.2.** The previous version predated
-two design reviews and the planning pass; it referenced a `/decide` endpoint that
-no longer exists and a 15-ticket set that is now 18. Do not use a cached copy.
+**Current for `PLAN.md` v1.1 / `DESIGN.md` v1.3 / `spec/02` v1.1 / `spec/03`
+v1.1.** Two design reviews and one plan review have changed these documents.
+Do not use a cached copy.
 
 Paste the block below into the Codex orchestrator session.
 
@@ -35,44 +35,51 @@ Then run:
 python scripts/validate_plan.py
 ```
 
+Bare `python`, **not `uv run`** — at this point `pyproject.toml` does not exist
+yet (AIR-1 creates it), so there is no environment to run under. The script is
+standard-library-only for exactly this reason.
+
 It must exit 0. It checks the graph is acyclic, every dependency resolves, every
-`reads` path exists, and every ticket has the four required sections. **If it
-fails, stop and tell me.** Do not fix the plan yourself.
+`reads` path exists, every ticket has the four required sections, and that
+`PLAN.md` §5's dependency and wave tables still match `tickets.yaml`. **Keep its
+output** — the wave schedule you dispatch from is the one it prints.
 
-## Step 1 — Create the Linear issues
+**If it fails, stop and tell me.** Do not fix the plan yourself.
 
-Using the Linear MCP connection, create one issue per entry in `tickets.yaml`
-under team `AIR`, project **Airgap**.
+## Step 1 — Reconcile Linear against `tickets.yaml`
 
-- Title from `title`; description from `body` **verbatim**.
-- Prepend a line linking the contract docs in that ticket's `reads` list.
-- Label with `tier`. Label `human` where set.
-- Record `depends_on` as Linear blocking relationships, so the graph is visible
-  in Linear and not only in the YAML.
+**The 18 Linear issues already exist.** They were created from `tickets.yaml`
+before this session started; you are not creating them.
+
+Your job is to confirm Linear still matches the file, because the file is the
+source of truth and Linear is the mirror. For each entry in `tickets.yaml`, check
+the Linear issue has: the same title, the `body` as its description, the `tier`
+label, the `human` label where set, and `depends_on` recorded as blocking
+relationships.
+
+**Where they disagree, `tickets.yaml` wins and you correct Linear** — never the
+other way round. Report anything you had to correct; a drifted mirror usually
+means somebody edited the wrong copy, and I want to know which.
 
 Do not invent tickets, merge tickets, split tickets, or reword acceptance
-criteria. **Report the created issue ids to me and wait** before dispatching.
+criteria. **Report what you found and wait** before dispatching.
 
 ## Step 2 — Respect the graph
 
 Do not start a ticket until every entry in its `depends_on` is **merged to main**
-— not approved, merged. The authoritative wave order is whatever
-`scripts/validate_plan.py` prints. As of now:
+— not approved, merged.
 
-```
- 1: AIR-1
- 2: AIR-16                          <- vocabulary gate. nothing behavioural before this
- 3: AIR-2, AIR-4, AIR-7
- 4: AIR-11, AIR-3, AIR-5 (human), AIR-8
- 5: AIR-12, AIR-6
- 6: AIR-17                          <- highest-risk ticket in the project
- 7: AIR-9
- 8: AIR-10, AIR-13, AIR-18
- 9: AIR-14
-10: AIR-15
-```
+**The wave order is whatever `scripts/validate_plan.py` printed in Step 0. Use
+that output. Do not copy it into your notes and work from the copy** — a third
+transcription of the schedule is a third thing that can drift, and drift between
+copies of one fact is the failure mode this whole project is organised against
+(`PLAN.md` P1). The validator also checks `PLAN.md` §5 against `tickets.yaml`, so
+those two are guaranteed to agree with each other and with what it printed.
 
-Peak concurrency is **3 agent sessions**. AIR-5 is human and consumes none.
+Two things worth knowing without looking them up: **AIR-16 is a hard gate — no
+behavioural ticket starts before the vocabulary is single-sourced** — and
+**AIR-17 is the highest-risk ticket in the project.** Peak concurrency is 3 agent
+sessions; AIR-5 is human and consumes none.
 
 ## Step 3 — Dispatch policy
 
@@ -158,8 +165,10 @@ whole structure exists to prevent.
 
 ## Step 7 — Milestone gates
 
-There are four, from `PLAN.md` §7: **M0** foundations, **M1** interlock provably
-correct, **M2** MVP end to end, **M3** physical hardware, **M4** demo ready.
+There are **five**, from `PLAN.md` §7: **M0** foundations, **M1** interlock
+provably correct, **M2** MVP end to end, **M3** physical hardware, **M4** demo
+ready. Five milestones, five gates — an earlier draft of this prompt said "four"
+and then listed five, which is an invitation to skip one.
 
 At each, report and **wait for my go-ahead**. Do not advance a milestone on your
 own. Each has exit criteria that are commands exiting 0, not judgments — run them

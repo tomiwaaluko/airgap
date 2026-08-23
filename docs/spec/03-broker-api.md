@@ -1,4 +1,8 @@
-# Broker API — FROZEN CONTRACT v1
+# Broker API — FROZEN CONTRACT v1.1
+
+> **v1.1 (2026-08-23), plan review I3.** Added the `ui_ro` scope. The terminal
+> reader would otherwise have held a token that can rewrite the policy table.
+
 
 The Broker holds an agent's tool call open until a human decides. This document
 is the contract for both its HTTP surface and the MCP tool built on top of it.
@@ -74,10 +78,19 @@ processes with different needs (I4).
 |---|---|---|
 | `agent` | MCP server | `POST /request_approval` only |
 | `ui` | Dashboard backend | `GET /pending`, `/audit`, `/policies`, and `PUT /policies/{pattern}` |
+| `ui_ro` | `airgap watch` terminal reader | `GET /pending`, `/audit`, `/policies`. **No write route, ever** |
 
-Both are generated at broker startup and held in memory. The `agent` token grants
-nothing that can resolve a request; the `ui` token grants nothing that can
-approve one. Neither scope can reach the other's routes.
+All three are generated at broker startup and held in memory. The `agent` token
+grants nothing that can resolve a request; no `ui*` token grants anything that
+can approve one. No scope can reach another's routes.
+
+`ui_ro` exists because read access and policy-write access have no reason to
+share a credential. The terminal reader is a long-running local process whose
+environment a co-resident agent can often read; giving it a token that can widen
+the policy table would hand N-T8 to exactly the party the system exists to
+constrain. A reader needs to read. `PUT /policies/{pattern}` is therefore
+reachable **only** with `ui`, and a `ui_ro` token presented to it is rejected with
+`403` — not silently ignored, and not downgraded to a no-op.
 
 Hardening:
 
@@ -89,8 +102,11 @@ Hardening:
   check it against an allowlist instead of rejecting it, and `PUT /policies`
   additionally requires a double-submit CSRF token. v1.1's blanket `Origin`
   rejection would have broken the dashboard (I4).
-- The dashboard has **no approve capability**: no route, no button, no token
-  scope, and nothing in `ui` scope that resolves a request.
+- `ui_ro` is not a browser. Like `agent`, it rejects any request carrying an
+  `Origin` header, which keeps the read-only token off the browser-reachable
+  path entirely.
+- **No reader has an approve capability**: no route, no button, no token scope,
+  and nothing in `ui` or `ui_ro` scope that resolves a request.
 
 ### `GET /pending`
 

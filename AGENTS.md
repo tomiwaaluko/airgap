@@ -132,15 +132,35 @@ yours doesn't, you must not need hardware.
 ## 5. Conventions
 
 - **Typed.** Full annotations on every public function. `mypy` must pass.
-- **Pure core.** `protocol.py` and `policy.py` do no I/O and import nothing from
-  the rest of the package. Keep it that way; it is what makes them testable.
+- **Pure core.** `protocol.py` and `policy.py` do no I/O, and import **exactly one
+  thing** from the rest of the package: `airgap.vocab`. Nothing else — no
+  transport, no database, no broker, no config. `vocab.py` itself imports nothing
+  internal at all, so the core stays a leaf plus one leaf.
+
+  The single exception is deliberate. The alternative is each module redeclaring
+  the command and verdict enums inline, which is precisely the vocabulary drift
+  AIR-16 exists to make impossible (`PLAN.md` P1). Purity is a means to
+  testability, and a `StrEnum` module with no I/O and no internal imports costs it
+  nothing. `tests/test_layering.py` enforces the rule in this exact shape.
 - **Errors are values at boundaries, exceptions inside.** `decode()` returns
   `None` on a bad frame rather than raising, because a garbage byte on a serial
   line is expected, not exceptional. `Supervisor.send()` raises, because being
   asked to send a forbidden command is a programming error.
 - **No new dependencies** without saying so in the ticket comment. The stack is
   fastapi, uvicorn, pydantic, sqlalchemy, alembic, httpx, pyserial, mcp,
-  anthropic, pytest, ruff, mypy. That should be enough.
+  anthropic, rich, pytest, hypothesis, freezegun, ruff, mypy. That should be
+  enough. All of it goes into `pyproject.toml` at AIR-1 — a later ticket that
+  needs one of these is not adding a dependency, it is using one already
+  declared, and does not need a comment.
+
+  `hypothesis` is required by the property tests in AIR-2 and AIR-11, `freezegun`
+  by §6's no-`sleep()` rule, and `rich` by the terminal reader. They are listed
+  here because a ticket cannot both honour "the stack is the AGENTS.md list" and
+  add something absent from it.
+
+  **`scripts/validate_plan.py` deliberately depends on none of this.** It is the
+  pre-dispatch gate and must run on a bare checkout, before `pyproject.toml`
+  exists. Standard library only. Do not "improve" it by importing PyYAML.
 - **Docstrings explain why, not what.** The signature says what.
 - **No `TODO` comments.** If work is left over, it is a new Linear ticket.
 
