@@ -1,0 +1,452 @@
+// This file is the SOURCE OF TRUTH for the Airgap ticket set.
+// Linear mirrors it. If they disagree, this file wins and Linear gets corrected.
+//
+// Fields:
+//   id           stable key, also the branch prefix (air-7-...)
+//   title        Linear issue title
+//   tier         mechanical | standard | design | safety-critical  (see AGENTS.md §10)
+//   depends_on   ticket ids that must be merged first
+//   human        true = a person must do this, do not dispatch an agent
+//   reads        contract docs the implementer must read before coding
+//   body         Linear issue description, verbatim
+version: 1
+project: Airgap
+team_key: AIR
+
+tickets:
+
+  - id: AIR-1
+    title: "Repo scaffold, tooling, and CI"
+    tier: mechanical
+    depends_on: []
+    reads: ["docs/spec/00-overview.md"]
+    body: |
+      ## Context
+      Nothing exists yet except contract documents and one spike. Every other
+      ticket assumes `uv sync` and `uv run pytest` work.
+
+      ## Scope
+      - `pyproject.toml` with the dependency set listed in AGENTS.md §5. Python 3.14.
+      - Package skeleton at `src/airgap/` with `__init__.py` and empty typed stubs
+        for the modules named in `docs/spec/00-overview.md`. Stubs raise
+        `NotImplementedError`; they exist so imports resolve.
+      - `tests/` with a peer file per module, each containing one passing
+        placeholder so the suite is green.
+      - `ruff` and `mypy` configured strictly. `mypy` in strict mode on `src/`.
+      - `tests/test_layering.py`: scans the source tree and fails if any module
+        other than `supervisor.py` imports `transport`. This enforces invariant 7.
+      - GitHub Actions workflow running lint, types, and tests on push.
+      - `.gitignore` covering `.venv/`, `__pycache__/`, `*.db`, `.env`.
+
+      ## Acceptance criteria
+      - `uv sync` succeeds from a clean clone.
+      - `uv run pytest`, `uv run ruff check .`, `uv run mypy src/` all exit 0.
+      - `tests/test_layering.py` fails if you temporarily add
+        `import airgap.transport` to `broker.py` (try it, then revert).
+
+      ## Verification
+      `uv sync && uv run ruff check . && uv run mypy src/ && uv run pytest`
+
+  - id: AIR-2
+    title: "Serial protocol codec"
+    tier: standard
+    depends_on: [AIR-1]
+    reads: ["docs/spec/01-serial-protocol.md"]
+    body: |
+      ## Context
+      The wire contract is frozen. This is the pure, I/O-free implementation of
+      it that both the bridge and the tests build on.
+
+      ## Scope
+      - Typed command and event models in `src/airgap/protocol.py` (pydantic or
+        dataclasses, your call — justify in the PR).
+      - `encode(cmd) -> bytes` — trailing `\n`, ASCII, raises `FrameTooLong`
+        above 200 bytes.
+      - `decode(line: bytes) -> Ack | Event | None` — returns `None` on anything
+        unparseable. Never raises.
+      - Monotonic id allocator that wraps 65535 -> 1.
+
+      ## Acceptance criteria
+      - Every command and event shape in the spec round-trips.
+      - Property test: `decode(encode(c))` preserves all fields, for generated
+        valid `c` (use `hypothesis`).
+      - Fuzz test: `decode()` returns `None` and does not raise for 1000 random
+        byte strings including truncated JSON, embedded nulls, and non-UTF-8.
+      - `lcd` truncation to 16 chars happens here, host-side, per the spec.
+      - No imports from anywhere else in `airgap`. No I/O.
+
+      ## Verification
+      `uv run pytest tests/test_protocol.py -v`
+
+      ## Out of scope
+      Serial port handling. That is AIR-3.
+
+  - id: AIR-3
+    title: "Transport layer: MockTransport and SerialTransport"
+    tier: standard
+    depends_on: [AIR-2]
+    reads: ["docs/spec/01-serial-protocol.md"]
+    body: |
+      ## Context
+      Almost all development happens with no Arduino attached. `MockTransport` is
+      what makes that possible, so it is the more important half of this ticket.
+
+      ## Scope
+      - One `Transport` protocol/ABC: `write(frame: bytes)`, async
+        `read_lines() -> AsyncIterator[bytes]`, `close()`, `connected: bool`.
+      - `SerialTransport` over `pyserial`, 115200 8N1, non-blocking line assembly
+        with a 200-byte buffer that discards and counts overflows.
+      - `MockTransport` that records written frames and replays a scripted
+        sequence of device lines, including the 1 Hz `tick` stream. It must be
+        able to simulate: normal operation, tick starvation, garbage bytes,
+        a mid-stream `boot` event, and disconnection.
+      - Ack correlation: match acks to command ids, surface a 100 ms timeout.
+
+      ## Acceptance criteria
+      - `MockTransport` can drive every scenario listed above from a test.
+      - Line assembly is correct across chunk boundaries: a frame split into three
+        arbitrary reads still decodes once.
+      - Buffer overflow discards exactly the overlong line and recovers on the next.
+      - No test in this ticket requires physical hardware.
+
+      ## Verification
+      `uv run pytest tests/test_transport.py -v`
+
+  - id: AIR-4
+    title: "Arduino firmware: command interpreter"
+    tier: design
+    depends_on: [AIR-2]
+    reads: ["docs/spec/04-firmware.md", "docs/spec/01-serial-protocol.md"]
+    body: |
+      ## Context
+      One sketch, flashed once, never reflashed mid-demo. It implements the device
+      side of the protocol and nothing else. The pin map is frozen and the timer
+      reasoning behind it is in the spec — read that section before moving a pin.
+
+      ## Scope
+      - `firmware/airgap/airgap.ino` implementing the full command set, the ack
+        contract, button events with the armed `req` echo, and the 1 Hz tick.
+      - Boot sequence exactly as specified: relay LOW first, then flag up, LED red.
+      - Non-blocking throughout. No `delay()` anywhere. Main loop under 5 ms.
+      - 25 ms button debounce via `millis()`.
+      - Dial low-pass filtered, mapped 0..1023 -> 0..10 with ±1 raw-step hysteresis.
+      - `README.md` in `firmware/` with the wiring table and how to flash.
+
+      ## Acceptance criteria
+      - Compiles for Arduino UNO with `arduino-cli compile --fqbn arduino:avr:uno`.
+      - Every command in the spec is handled; unknown commands ack with
+        `{"ok":false,"err":"unknown_cmd"}`.
+      - Button events while disarmed carry `"req":null`.
+      - No `delay()` call anywhere in the sketch (grep it in the PR).
+
+      ## Verification
+      `arduino-cli compile --fqbn arduino:avr:uno firmware/airgap`
+
+      ## Out of scope
+      Running it on real hardware — that is AIR-5, a human task.
+
+  - id: AIR-5
+    title: "Hardware bring-up on the physical device"
+    tier: standard
+    human: true
+    depends_on: [AIR-4]
+    reads: ["docs/spec/04-firmware.md"]
+    body: |
+      ## Context
+      **This ticket requires a person, an Arduino, and a breadboard. Do not
+      dispatch an agent to it.**
+
+      ## Scope
+      Wire the device per the pin map and work through the bring-up checklist in
+      `docs/spec/04-firmware.md`, recording the result of each step.
+
+      ## Acceptance criteria
+      All seven checklist items pass, especially item 6: **unplug the USB cable
+      while the relay is closed and confirm the relay opens.** If it does not, the
+      relay wiring is inverted and every safety claim downstream is void — stop
+      and fix the wiring before closing this ticket.
+
+      ## Verification
+      Checklist results pasted into the ticket, plus a photo of the wired board.
+
+  - id: AIR-6
+    title: "Supervisor: validation, clamps, rate limits, relay interlock, fail-safe"
+    tier: safety-critical
+    depends_on: [AIR-3]
+    reads: ["docs/spec/02-supervisor.md"]
+    body: |
+      ## Context
+      This is the module that makes "the model cannot write to the device" a
+      structural fact. It is the highest-risk code in the project. Enumerate the
+      failure modes before you implement, and adversarially review your own work
+      before opening the PR.
+
+      ## Scope
+      Implement `src/airgap/supervisor.py` to the frozen contract: the command
+      allowlist, the value clamps, the four rate limits, the five-condition relay
+      interlock, and the fail-safe transition.
+
+      ## Acceptance criteria
+      Every test obligation listed at the end of `docs/spec/02-supervisor.md`,
+      each failure mode tested **independently**:
+      - all clamp boundaries
+      - each of the five interlock conditions failing on its own
+      - mismatched `req` never closes the relay
+      - button while disarmed never closes the relay
+      - a replayed button event closes the relay at most once
+      - 3001 ms of tick starvation enters the safe state
+      - `relay(closed=False)` succeeds in every state, including the safe state
+      - `relay` commands are rejected, never silently dropped, on rate limit
+
+      ## Verification
+      `uv run pytest tests/test_supervisor.py -v` and paste the full test list.
+
+  - id: AIR-7
+    title: "Data model and migrations"
+    tier: standard
+    depends_on: [AIR-1]
+    reads: ["docs/spec/05-data-model.md"]
+    body: |
+      ## Context
+      Four tables, frozen schema. The audit table has an unusual constraint: it
+      must be append-only at the database level, not merely by convention.
+
+      ## Scope
+      - SQLAlchemy 2.x models in `src/airgap/models.py` for `requests`,
+        `warden_assessments`, `audit_log`, `policies`.
+      - Alembic migration creating all four, with the specified indexes.
+      - A Postgres rule or trigger that rejects UPDATE and DELETE on `audit_log`.
+      - Session factory and a `get_session()` dependency for FastAPI.
+
+      ## Acceptance criteria
+      - Migration applies cleanly to an empty Postgres and downgrades cleanly.
+      - A test asserts that UPDATE and DELETE against `audit_log` both raise.
+      - Column names and types match the spec exactly.
+
+      ## Verification
+      `uv run alembic upgrade head && uv run pytest tests/test_models.py -v`
+
+  - id: AIR-8
+    title: "Audit log with verifiable hash chain"
+    tier: safety-critical
+    depends_on: [AIR-7]
+    reads: ["docs/spec/05-data-model.md"]
+    body: |
+      ## Context
+      The audit chain is what makes the log tamper-evident. Its canonical-JSON
+      function is load-bearing: if a future refactor changes serialisation, every
+      hash after that point silently stops verifying.
+
+      ## Scope
+      - `src/airgap/audit.py`: `append(event, request_id, payload)` and
+        `verify_chain(from_seq=0) -> tuple[bool, int | None]`.
+      - Canonical JSON: sorted keys, no whitespace, UTF-8.
+      - Genesis row hashes against 64 zeros.
+
+      ## Acceptance criteria
+      - A **pinned known-good vector**: a fixed input whose expected hash is
+        hardcoded in the test. This is what protects against silent serialisation
+        drift — do not compute it from the implementation.
+      - `verify_chain` returns `(True, None)` for a healthy chain.
+      - Mutating any field of any row (via raw SQL, bypassing the trigger) makes
+        `verify_chain` return that row's seq.
+      - Key ordering in `payload` does not affect the hash.
+
+      ## Verification
+      `uv run pytest tests/test_audit.py -v`
+
+  - id: AIR-9
+    title: "Broker: blocking request/decide core"
+    tier: design
+    depends_on: [AIR-6, AIR-7]
+    reads: ["docs/spec/03-broker-api.md", "spikes/01-blocking-tool-call/FINDINGS.md"]
+    body: |
+      ## Context
+      The blocking call is the whole product. It was verified against a real MCP
+      client before this was specced — read the spike findings so you understand
+      what is already known to work and do not redesign it into handle-and-poll.
+
+      ## Scope
+      - FastAPI app in `src/airgap/broker.py` with `/request_approval`,
+        `/decide/{id}`, `/pending`, `/health` per the contract.
+      - Requests park on an `asyncio.Event`. Exactly one armed at a time; others
+        queue FIFO with their callers still blocked.
+      - 30-minute configurable expiry resolving to `expired`, relay open.
+      - Startup recovery: disarm, open relay, mark stale pending rows `link_lost`.
+      - Every state change written to the audit log **before** it is acted on.
+
+      ## Acceptance criteria
+      - A request blocks until `/decide` is called, then returns the verdict.
+      - Two concurrent requests: the second stays blocked while the first is armed,
+        and is armed only after the first resolves.
+      - Expiry resolves to `expired` and leaves the relay open.
+      - Killing and restarting the broker marks pending rows `link_lost`; no
+        approval survives a restart.
+      - Tick starvation resolves all pending requests to `link_lost`.
+
+      ## Verification
+      `uv run pytest tests/test_broker.py -v`
+
+  - id: AIR-10
+    title: "MCP server exposing request_approval"
+    tier: standard
+    depends_on: [AIR-9]
+    reads: ["docs/spec/03-broker-api.md"]
+    body: |
+      ## Context
+      The public face of the system. Exactly one tool. The tool description is
+      load-bearing — it is the only thing telling an actor agent to call this
+      *before* acting rather than after — so use it verbatim from the spec.
+
+      ## Scope
+      - `src/airgap/mcp_server.py` using `MCPServer` from `mcp.server.mcpserver`.
+        Note: the `mcp` package is v2.x; `mcp.server.fastmcp` no longer exists.
+      - Both stdio and streamable-http transports, selected by CLI flag.
+      - No client-side timeout on the call to the broker.
+
+      ## Acceptance criteria
+      - `list_tools` returns exactly one tool with the schema from the spec.
+      - An in-process client gets `APPROVED: ...` / `DENIED: ...` text back.
+      - A call held open for 150 s returns correctly on both transports — the
+        spike harness already demonstrates the pattern, reuse its shape.
+
+      ## Verification
+      `uv run pytest tests/test_mcp_server.py -v`
+
+  - id: AIR-11
+    title: "Deterministic policy engine"
+    tier: safety-critical
+    depends_on: [AIR-7]
+    reads: ["docs/spec/05-data-model.md"]
+    body: |
+      ## Context
+      The policy engine runs **after** the Warden and can only narrow its verdict.
+      This asymmetry is the safety property: a compromised or jailbroken Warden
+      cannot widen its own authority.
+
+      ## Scope
+      - `src/airgap/policy.py`, pure, no I/O, no LLM calls.
+      - Glob matching of `tool_pattern` against tool names.
+      - `resolve(warden_verdict, policy_action, dial) -> Verdict` implementing the
+        resolution table in the spec exactly.
+      - The dial: escalate to human when `dial >= policy.min_dial`.
+
+      ## Acceptance criteria
+      - Every cell of the resolution table has its own test.
+      - Property test: for all inputs, `resolve()` never returns a verdict more
+        permissive than the Warden's. Assert this as an invariant, not a case.
+      - Turning the dial up never makes an outcome more permissive.
+      - No imports from elsewhere in `airgap`.
+
+      ## Verification
+      `uv run pytest tests/test_policy.py -v`
+
+  - id: AIR-12
+    title: "Warden triage agent"
+    tier: design
+    depends_on: [AIR-11]
+    reads: ["docs/spec/00-overview.md", "docs/spec/05-data-model.md"]
+    body: |
+      ## Context
+      An LLM that classifies risk and proposes a verdict. It has read-only tools.
+      It must not be able to reach the transport, the relay, or the policy engine's
+      output. Treat its response as a proposal, never an instruction.
+
+      ## Scope
+      - `src/airgap/warden.py` using the Anthropic Messages API with tool use.
+      - Read-only tools: `classify_risk`, `check_policy`, `search_decision_history`,
+        `check_injection_signature`, `read_autonomy_dial`.
+      - Writes a `warden_assessments` row for every request it sees.
+      - Structured output; a malformed or missing response falls back to
+        `escalate`, never to `auto_approve`.
+
+      ## Acceptance criteria
+      - Tests use a stubbed LLM client; no live API calls in the suite.
+      - A response that fails to parse yields `escalate`.
+      - An LLM response of `auto_approve` on a tool the policy blocks still
+        results in `block` end to end.
+      - The Warden has no import path to `transport` or `supervisor`
+        (`tests/test_layering.py` should cover this once extended).
+      - Prompt-injection strings in `justification` do not change the verdict —
+        include a handful of adversarial fixtures.
+
+      ## Verification
+      `uv run pytest tests/test_warden.py -v`
+
+  - id: AIR-13
+    title: "Dashboard: live queue, audit trail, policy editor"
+    tier: standard
+    depends_on: [AIR-9]
+    reads: ["docs/spec/03-broker-api.md", "docs/spec/05-data-model.md"]
+    body: |
+      ## Context
+      This is what a judge or a recruiter actually looks at. It should make the
+      blocking visible: a pending request with a running timer is the whole story.
+
+      ## Scope
+      - Next.js app in `web/`.
+      - Live pending queue over WebSocket or SSE, with elapsed-time counters.
+      - Audit trail with chain-verification status shown per row.
+      - Policy editor over the `policies` table.
+      - Link health indicator driven by `/health`.
+
+      ## Acceptance criteria
+      - Queue updates within 1 s of a request arriving, no manual refresh.
+      - A failed chain verification is visually unmistakable.
+      - Readable at 1280x800 (projector resolution) — this gets demoed.
+
+      ## Verification
+      `cd web && npm run build && npm run lint`
+
+  - id: AIR-14
+    title: "End-to-end integration test against MockTransport"
+    tier: design
+    depends_on: [AIR-10, AIR-12]
+    reads: ["docs/spec/00-overview.md"]
+    body: |
+      ## Context
+      The first test that exercises the whole chain: MCP client through broker,
+      warden, policy, supervisor, to a scripted device and back.
+
+      ## Scope
+      `tests/test_e2e.py` covering the full path with `MockTransport` and a
+      stubbed LLM. No hardware, no live API.
+
+      ## Acceptance criteria
+      Each of these end to end:
+      - happy path: request -> escalate -> scripted approve button -> relay closes
+        -> tool call returns APPROVED
+      - deny path: relay never closes, tool returns DENIED
+      - policy block overrides a Warden auto-approve
+      - link loss mid-request resolves to `link_lost`, relay open
+      - a button event with a mismatched `req` does not close the relay and the
+        request stays pending
+      - the audit chain verifies after every scenario
+
+      ## Verification
+      `uv run pytest tests/test_e2e.py -v`
+
+  - id: AIR-15
+    title: "Demo runbook and seed data"
+    tier: mechanical
+    depends_on: [AIR-14, AIR-5]
+    reads: ["docs/spec/00-overview.md"]
+    body: |
+      ## Context
+      A demo that fails on stage because Postgres wasn't running is a preventable
+      loss. This ticket makes the demo a script, not a memory exercise.
+
+      ## Scope
+      - `docs/DEMO.md`: exact steps, in order, with the 60-second script.
+      - `scripts/seed_demo.py`: policies and a plausible decision history so
+        `search_decision_history` has something to find.
+      - `scripts/preflight.py`: checks Postgres, the serial port, the relay, and
+        the LED/servo, then prints a green or red summary.
+      - A recorded fallback video in case the hardware dies on stage.
+
+      ## Acceptance criteria
+      - `preflight.py` exits non-zero with a clear message if the device is absent.
+      - A cold machine can go from clone to working demo following DEMO.md alone.
+
+      ## Verification
+      `uv run python scripts/preflight.py`

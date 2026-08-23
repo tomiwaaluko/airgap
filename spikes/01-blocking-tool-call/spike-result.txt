@@ -1,0 +1,34 @@
+
+====================================================================
+SDK TIMEOUT SURFACE -- what knobs exist and what they default to
+====================================================================
+  ClientSession.__init__(read_timeout_seconds) default = None
+  ClientSession.call_tool(read_timeout_seconds) default = None
+  Client.__init__(read_timeout_seconds) default = None
+  Client.call_tool(read_timeout_seconds) default = None
+
+broker up on :8791
+
+====================================================================
+CASE: stdio transport, client defaults  -- holding the call for 150s
+====================================================================
+HTTP Request: POST http://127.0.0.1:8791/request_approval "HTTP/1.1 200 OK"
+  driver: pressed APPROVE on request cff7678f after 150s
+  -> SURVIVED after 151.1s
+  -> APPROVED: human pressed APPROVE
+
+====================================================================
+CASE: streamable-http transport, client defaults  -- holding the call for 150s
+====================================================================
+  driver: pressed APPROVE on request 84e27916 after 150s
+  -> SURVIVED after 150.1s
+  -> APPROVED: human pressed APPROVE
+
+====================================================================
+FINDING
+====================================================================
+  [PASS] stdio transport, client defaults  (151.1s)
+  [PASS] streamable-http transport, client defaults  (150.1s)
+
+  Blocking tool calls survive 150s on BOTH transports with default
+  client settings. Airgap's blocking architecture is SOUND as specified.
