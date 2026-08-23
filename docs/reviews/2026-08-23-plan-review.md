@@ -3,8 +3,8 @@
 **Reviewed:** `PLAN.md` v1.0 against `DESIGN.md` v1.2, `spec/00`–`05`,
 `tickets.yaml`, `AGENTS.md`, and `scripts/validate_plan.py`.
 **Verdict given:** do not start wave 1 on this text. 3 Critical, 7 Important,
-5 Minor.
-**Outcome:** all 15 accepted, one with a scoping change and one with a partial
+4 Minor.
+**Outcome:** all 14 accepted, one with a scoping change and one with a partial
 disagreement recorded below. `PLAN.md` is now v1.1; `DESIGN.md` v1.3; `spec/02`
 and `spec/03` v1.1.
 
