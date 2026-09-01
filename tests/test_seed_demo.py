@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import os
 import sys
-from collections.abc import Iterator
+from collections import deque
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
 import pytest
@@ -204,6 +206,94 @@ def test_live_broker_refuses_missing_serial_port(
     buf = io.StringIO()
     assert run_broker.run_broker(stdout=buf) != 0
     assert "AIRGAP_SERIAL_PORT" in buf.getvalue()
+
+
+_BOOT = b'{"ev":"boot","fw":"1.0.0","t":12}\n'
+
+
+class _QueuedBootTransport:
+    """Ingests a boot line into `_event_lines` the way SerialTransport does."""
+
+    def __init__(self, pending: list[bytes]) -> None:
+        self._pending = deque(pending)
+        self._event_lines: deque[bytes] = deque()
+        self._closed = False
+
+    @property
+    def connected(self) -> bool:
+        return not self._closed
+
+    def _ingest_available(self) -> None:
+        if self._pending:
+            self._event_lines.append(self._pending.popleft())
+
+    async def read_lines(self) -> AsyncIterator[bytes]:
+        while self.connected:
+            if self._event_lines:
+                yield self._event_lines.popleft()
+                continue
+            return
+
+    def close(self) -> None:
+        self._closed = True
+
+
+class _SilentBootTransport:
+    def __init__(self) -> None:
+        self._event_lines: deque[bytes] = deque()
+        self._closed = False
+
+    @property
+    def connected(self) -> bool:
+        return not self._closed
+
+    def _ingest_available(self) -> None:
+        return
+
+
+def test_boot_wait_does_not_consume_queued_line() -> None:
+    transport = _QueuedBootTransport([_BOOT])
+    err = asyncio.run(run_broker.wait_for_boot_queued(transport, timeout_s=0.05))
+    assert err is None
+    assert run_broker.boot_queued(transport)
+    assert _BOOT in transport._event_lines
+
+    async def _first() -> bytes | None:
+        async for line in transport.read_lines():
+            return line
+        return None
+
+    leftover = asyncio.run(_first())
+    assert leftover == _BOOT
+
+
+def test_boot_wait_silent_transport_fails_closed() -> None:
+    err = asyncio.run(
+        run_broker.wait_for_boot_queued(_SilentBootTransport(), timeout_s=0.05)
+    )
+    assert err is not None
+    assert "boot" in err.lower()
+
+
+def test_missing_anthropic_key_does_not_raise_from_setup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    buf = io.StringIO()
+    warden = run_broker.warden_from_env(_StubSession(), stdout=buf)
+    assert "ANTHROPIC_API_KEY" in buf.getvalue()
+    assert "RED" in buf.getvalue()
+    result = warden.triage(
+        TriageRequest(
+            request_id="d15a00ff",
+            actor="test",
+            tool_name="db.drop_table",
+            tool_args={},
+            justification="loader",
+        ),
+        dial=0,
+    )
+    assert result.proposal is PolicyAction.ESCALATE
 
 
 @pytest.fixture

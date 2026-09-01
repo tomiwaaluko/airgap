@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import time
@@ -15,6 +16,7 @@ from airgap.audit import append
 from airgap.broker import RequestStore, StoredRequest, create_app, run
 from airgap.models import Policy, Request, database_url, session_factory
 from airgap.policy import PolicyRule, matches_tool
+from airgap.protocol import BootEvent, decode
 from airgap.supervisor import Supervisor
 from airgap.transport import SerialTransport
 from airgap.vocab import AuditEvent, DecidedBy, PolicyAction, Verdict
@@ -23,8 +25,23 @@ from airgap.warden import Warden
 MISSING_SERIAL = (
     "AIRGAP_SERIAL_PORT is missing; live demo refuses MockTransport"
 )
+NO_BOOT = "no boot frame after serial open (UNO typically resets on open)"
+WARDEN_UNAVAILABLE = (
+    "ANTHROPIC_API_KEY is missing; Warden unavailable, human path still works"
+)
+BOOT_WAIT_S = 3.0
 _TOKEN_NAMES = ("AIRGAP_AGENT_TOKEN", "AIRGAP_UI_TOKEN", "AIRGAP_UI_RO_TOKEN")
 _ORIGIN = "http://127.0.0.1:3000"
+
+
+class _UnavailableWardenClient:
+    """messages.create raises so Warden.triage fails closed to escalate."""
+
+    def __init__(self) -> None:
+        self.messages = self
+
+    def create(self, **kwargs: object) -> object:
+        raise RuntimeError(WARDEN_UNAVAILABLE)
 
 
 def _as_dict(value: object) -> dict[str, object]:
@@ -136,6 +153,62 @@ def on_audit(event: str, request_id: str | None, payload: object) -> None:
     append(AuditEvent(event), request_id, payload)
 
 
+def boot_queued(transport: object) -> bool:
+    """True if a boot JSON line is already in `_event_lines` (no pop)."""
+    lines = getattr(transport, "_event_lines", None)
+    if lines is None:
+        return False
+    for line in lines:
+        if isinstance(line, bytes) and isinstance(decode(line), BootEvent):
+            return True
+    return False
+
+
+async def wait_for_boot_queued(
+    transport: object, *, timeout_s: float = BOOT_WAIT_S
+) -> str | None:
+    """Ingest into the event queue until boot is visible. Do not consume it."""
+
+    async def _poll() -> bool:
+        while True:
+            ingest = getattr(transport, "_ingest_available", None)
+            if callable(ingest):
+                ingest()
+            if boot_queued(transport):
+                return True
+            if not getattr(transport, "connected", True):
+                return False
+            await asyncio.sleep(0)
+
+    try:
+        found = await asyncio.wait_for(_poll(), timeout=timeout_s)
+    except TimeoutError:
+        return NO_BOOT
+    except Exception as exc:
+        return f"{NO_BOOT}: {exc}"
+    if not found:
+        return NO_BOOT
+    return None
+
+
+def warden_from_env(
+    session: object,
+    *,
+    env: Mapping[str, str] | None = None,
+    stdout: TextIO | None = None,
+) -> Warden:
+    """Use Anthropic when keyed; otherwise a client whose create() raises."""
+    source = os.environ if env is None else env
+    key = source.get("ANTHROPIC_API_KEY", "")
+    if not key:
+        if stdout is not None:
+            stdout.write(f"RED    {WARDEN_UNAVAILABLE}\n")
+        return Warden(_UnavailableWardenClient(), session)
+    from anthropic import Anthropic
+
+    return Warden(Anthropic(api_key=key), session)
+
+
 def run_broker(*, stdout: TextIO | None = None) -> int:
     out = sys.stdout if stdout is None else stdout
     try:
@@ -151,14 +224,23 @@ def run_broker(*, stdout: TextIO | None = None) -> int:
         out.write(f"RED    {exc}\n")
         return 1
 
-    from anthropic import Anthropic
+    try:
+        transport = SerialTransport(port)
+    except Exception as exc:
+        out.write(f"RED    {MISSING_SERIAL}: {exc}\n")
+        return 1
+    boot_err = asyncio.run(wait_for_boot_queued(transport))
+    if boot_err is not None:
+        out.write(f"RED    {boot_err}\n")
+        transport.close()
+        return 1
 
     factory = session_factory()
     session = factory()
     rules, store = load_demo_state(session)
     app = create_app(
-        supervisor=Supervisor(SerialTransport(port)),
-        warden=Warden(Anthropic(), session),
+        supervisor=Supervisor(transport),
+        warden=warden_from_env(session, stdout=out),
         on_audit=on_audit,
         clock=time.monotonic,
         policies=rules,

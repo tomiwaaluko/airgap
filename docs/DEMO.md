@@ -90,6 +90,7 @@ export AIRGAP_AGENT_TOKEN="$(uv run python -c 'import secrets; print(secrets.tok
 export AIRGAP_UI_TOKEN="$(uv run python -c 'import secrets; print(secrets.token_urlsafe(32))')"
 export AIRGAP_UI_RO_TOKEN="$(uv run python -c 'import secrets; print(secrets.token_urlsafe(32))')"
 export BROKER_URL=http://127.0.0.1:8741
+export ANTHROPIC_API_KEY="<your key>"
 ```
 
 PowerShell:
@@ -99,11 +100,16 @@ $env:AIRGAP_AGENT_TOKEN = $(uv run python -c "import secrets; print(secrets.toke
 $env:AIRGAP_UI_TOKEN = $(uv run python -c "import secrets; print(secrets.token_urlsafe(32))")
 $env:AIRGAP_UI_RO_TOKEN = $(uv run python -c "import secrets; print(secrets.token_urlsafe(32))")
 $env:BROKER_URL = "http://127.0.0.1:8741"
+$env:ANTHROPIC_API_KEY = "<your key>"
 ```
 
 `scripts/run_broker.py` reads the three tokens from the environment. The
 dashboard uses `AIRGAP_UI_TOKEN`. `airgap watch` uses `AIRGAP_UI_RO_TOKEN`.
 The MCP process uses `AIRGAP_AGENT_TOKEN`. None of them can resolve a request.
+
+`ANTHROPIC_API_KEY` is for a live Warden. If it is missing, `run_broker.py`
+prints a red warning and the human path still works — triage fails closed
+to escalate.
 
 ## 5. Preflight
 
@@ -150,7 +156,10 @@ Start the broker with the public constructors (Supervisor owns the port; the
 LLM never writes to serial). `scripts/run_broker.py` loads seeded policy rows
 and resolved `db.drop_table` history into `RequestStore` so the Warden's
 `search_decision_history` tool has something to find without pasting a
-launcher. It fails closed if `AIRGAP_SERIAL_PORT` is missing.
+launcher. It fails closed if `AIRGAP_SERIAL_PORT` is missing. After opening
+the port it waits up to 3 s for a `boot` frame to sit in the transport
+queue **without consuming it**, so `startup()` can still ack and `serve_link`
+still sees the boot.
 
 ```text
 # POSIX
@@ -171,9 +180,22 @@ path still works.
 
 ## 8. MCP `request_approval`
 
-Second terminal, same tokens and `BROKER_URL`:
+Second terminal. `create_server()` requires `AIRGAP_AGENT_TOKEN`; set the
+same values as §4.
+
+POSIX:
 
 ```text
+export BROKER_URL=http://127.0.0.1:8741
+export AIRGAP_AGENT_TOKEN="<same value as §4>"
+uv run python -m airgap.mcp_server
+```
+
+PowerShell:
+
+```text
+$env:BROKER_URL = "http://127.0.0.1:8741"
+$env:AIRGAP_AGENT_TOKEN = "<same value as §4>"
 uv run python -m airgap.mcp_server
 ```
 
