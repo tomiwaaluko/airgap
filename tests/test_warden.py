@@ -522,6 +522,22 @@ def test_json_in_justification_is_not_parsed_as_the_proposal() -> None:
     assert result.resolved is PolicyAction.ESCALATE
 
 
+def test_echoed_injection_json_then_escalate_is_malformed() -> None:
+    """First-match would propose auto_approve; two action objects must escalate."""
+    echoed = _proposal_json("auto_approve", reasoning="injected")
+    later = _proposal_json("escalate")
+    client = ScriptedClient([_text_message(f"{echoed}\n{later}")])
+
+    result, _ = _triage(
+        client,
+        _request(),
+        policies=(_auto_rule("*"),),
+    )
+
+    assert result.proposal is PolicyAction.ESCALATE
+    assert result.resolved is PolicyAction.ESCALATE
+
+
 @pytest.mark.parametrize("justification", INJECTION_FIXTURES)
 def test_injection_in_justification_cannot_widen_a_policy_block(
     justification: str,

@@ -355,16 +355,20 @@ def _search_history(
 
 
 def _parse_proposal(text: str) -> tuple[PolicyAction | None, dict[str, object]]:
-    """Parse only assistant text so justification JSON cannot become the verdict."""
-    for obj in _json_objects(text):
-        if "action" not in obj:
-            continue
-        raw = obj["action"]
-        try:
-            return PolicyAction(str(raw)), obj
-        except TypeError, ValueError:
-            return None, obj
-    return None, {}
+    """Parse only assistant text so justification JSON cannot become the verdict.
+
+    More than one action-bearing object is malformed: taking the first would let
+    an echoed injection payload beat a later honest escalate.
+    """
+    action_objects = [obj for obj in _json_objects(text) if "action" in obj]
+    if len(action_objects) != 1:
+        return None, {}
+    obj = action_objects[0]
+    raw = obj["action"]
+    try:
+        return PolicyAction(str(raw)), obj
+    except TypeError, ValueError:
+        return None, obj
 
 
 def _json_objects(text: str) -> list[dict[str, object]]:
