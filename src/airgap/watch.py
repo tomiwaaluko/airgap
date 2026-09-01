@@ -142,11 +142,15 @@ class Watcher:
         return snapshot
 
     async def run(self) -> None:
-        console = self._console or Console()
+        console = self._console or Console(
+            markup=False,
+            highlight=False,
+            soft_wrap=True,
+        )
         while True:
             snapshot = await self.tick()
             console.clear()
-            console.print(snapshot.rendered)
+            _print_snapshot(console, snapshot)
             await _maybe_await(self._sleep(self._poll_interval))
 
     async def _get_json(self, path: str, *, required: bool) -> dict[str, object]:
@@ -219,39 +223,59 @@ class Watcher:
         return replace(snapshot, rendered=_render(snapshot))
 
 
+def _plain(value: str) -> Text:
+    """Untrusted copy is text, never Rich markup, and folds instead of cropping."""
+    return Text(value, overflow="fold", no_wrap=False)
+
+
+def _print_snapshot(console: Console, snapshot: WatchSnapshot) -> None:
+    meta = Table.grid(padding=(0, 2), expand=True)
+    meta.add_column(style="bold", no_wrap=True)
+    meta.add_column(overflow="fold", ratio=1)
+    meta.add_row("link", _plain(snapshot.link))
+    meta.add_row("queue", _plain(str(snapshot.queue_depth)))
+    meta.add_row("dial", _plain("—" if snapshot.dial is None else str(snapshot.dial)))
+    meta.add_row(
+        "elapsed_s",
+        _plain("—" if snapshot.elapsed_s is None else str(snapshot.elapsed_s)),
+    )
+    meta.add_row("short_code", _plain(snapshot.short_code or "—"))
+    meta.add_row("request_id", _plain(snapshot.request_id or "—"))
+    meta.add_row("actor", _plain(snapshot.actor or "—"))
+    meta.add_row("tool_name", _plain(snapshot.tool_name or "—"))
+    meta.add_row("risk_class", _plain(snapshot.risk_class or "—"))
+    meta.add_row("policy", _plain(_policy_line(snapshot.policy)))
+    meta.add_row("justification", _plain(snapshot.justification or "—"))
+    meta.add_row("reasoning", _plain(snapshot.reasoning or "—"))
+    console.print(
+        Panel(meta, title="airgap watch", subtitle="ui_ro · no approve"),
+        markup=False,
+        highlight=False,
+        crop=False,
+        overflow="fold",
+        soft_wrap=True,
+    )
+    console.print(
+        Panel(_plain(snapshot.tool_args_text), title="tool_args"),
+        markup=False,
+        highlight=False,
+        crop=False,
+        overflow="fold",
+        soft_wrap=True,
+    )
+
+
 def _render(snapshot: WatchSnapshot) -> str:
     console = Console(
         record=True,
         width=120,
         color_system=None,
         highlight=False,
+        markup=False,
         force_terminal=False,
         soft_wrap=True,
     )
-    meta = Table.grid(padding=(0, 2), expand=True)
-    meta.add_column(style="bold", no_wrap=True)
-    meta.add_column(overflow="fold", ratio=1)
-    meta.add_row("link", snapshot.link)
-    meta.add_row("queue", str(snapshot.queue_depth))
-    meta.add_row("dial", "—" if snapshot.dial is None else str(snapshot.dial))
-    meta.add_row(
-        "elapsed_s", "—" if snapshot.elapsed_s is None else str(snapshot.elapsed_s)
-    )
-    meta.add_row("short_code", snapshot.short_code or "—")
-    meta.add_row("request_id", snapshot.request_id or "—")
-    meta.add_row("actor", snapshot.actor or "—")
-    meta.add_row("tool_name", snapshot.tool_name or "—")
-    meta.add_row("risk_class", snapshot.risk_class or "—")
-    meta.add_row("policy", _policy_line(snapshot.policy))
-    meta.add_row("justification", snapshot.justification or "—")
-    meta.add_row("reasoning", snapshot.reasoning or "—")
-    console.print(Panel(meta, title="airgap watch", subtitle="ui_ro · no approve"))
-    console.print(
-        Panel(
-            Text(snapshot.tool_args_text, overflow="fold", no_wrap=False),
-            title="tool_args",
-        )
-    )
+    _print_snapshot(console, snapshot)
     return console.export_text()
 
 

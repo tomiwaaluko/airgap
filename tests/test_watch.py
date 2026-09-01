@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 import pytest
 from httpx import ASGITransport, AsyncClient
+from rich.console import Console
 from test_broker import (
     AGENT_BODY,
     Harness,
@@ -44,6 +45,14 @@ COLLIDING_ARGS: dict[str, object] = {
 
 def _run(coro: Awaitable[None]) -> None:
     asyncio.run(coro)
+
+
+class _StopWatch(Exception):
+    """Ends Watcher.run after one poll when injected as sleep."""
+
+
+def _stop_after_poll(_interval: float) -> None:
+    raise _StopWatch()
 
 
 class _SpyTransport(httpx.AsyncBaseTransport):
@@ -94,6 +103,7 @@ def _watcher(
     token: str | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
     sleep: Any = None,
+    console: Console | None = None,
 ) -> tuple[Watcher, AsyncClient]:
     inner = AsyncClient(
         transport=transport or ASGITransport(app=harness.app),
@@ -106,6 +116,7 @@ def _watcher(
         http_client=client,
         clock=harness.clock,
         sleep=sleep,
+        console=console,
     )
     return watcher, inner
 
@@ -278,6 +289,42 @@ async def _reader_token_cannot_write_policy() -> None:
         assert response.status_code == 403
     finally:
         await inner.aclose()
+
+
+def test_live_run_keeps_long_tool_args_and_literal_markup() -> None:
+    _run(_live_run_keeps_long_tool_args_and_literal_markup())
+
+
+async def _live_run_keeps_long_tool_args_and_literal_markup() -> None:
+    """Live run() at width 40 must keep full tool_args and literal markup."""
+    long_arg = "W" * 200
+    hijack = "[bold]hijack[/]"
+    harness = _harness(risk_class="high")
+    body = {
+        **AGENT_BODY,
+        "tool_args": {"blob": long_arg},
+        "justification": hijack,
+    }
+    armed, task, agent = await _arm(harness, body)
+    live = Console(
+        record=True,
+        width=40,
+        markup=False,
+        highlight=False,
+        soft_wrap=True,
+        color_system=None,
+        force_terminal=False,
+    )
+    watcher, inner = _watcher(harness, sleep=_stop_after_poll, console=live)
+    try:
+        with pytest.raises(_StopWatch):
+            await watcher.run()
+        exported = live.export_text()
+        assert "".join(ch for ch in exported if ch == "W") == long_arg
+        assert hijack in exported
+        assert max((len(line) for line in exported.splitlines()), default=0) <= 40
+    finally:
+        await _finish(harness, armed, task, inner, agent)
 
 
 def test_cli_watch_requires_ui_ro_token(monkeypatch: pytest.MonkeyPatch) -> None:
