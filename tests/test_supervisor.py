@@ -12,6 +12,7 @@ import pytest
 from airgap.protocol import (
     Ack,
     ArmCommand,
+    ButtonEvent,
     Command,
     LcdCommand,
     LedCommand,
@@ -199,13 +200,29 @@ def test_lcd_rate_limit_drops_third_lcd_in_one_second() -> None:
 def test_relay_rate_limit_rejects_never_drops() -> None:
     supervisor, transport, clock, _ = _supervisor()
 
-    _run(supervisor.send(RelayCommand(id=1, closed=True)))
+    supervisor.arm("a91f3c2e", relay_gated=True)
+    _run(supervisor.send(ArmCommand(id=10, req="a91f3c2e")))
+    _run(supervisor.on_event(ButtonEvent(which="approve", req="a91f3c2e", t=1)))
+    closes = [
+        frame
+        for frame in _frames(transport)
+        if frame.get("cmd") == "relay" and frame.get("closed") is True
+    ]
+    assert len(closes) == 1
     with pytest.raises(SupervisorRejection):
         _run(supervisor.send(RelayCommand(id=2, closed=True)))
-    assert len(transport.writes) == 1
+    closes = [
+        frame
+        for frame in _frames(transport)
+        if frame.get("cmd") == "relay" and frame.get("closed") is True
+    ]
+    assert len(closes) == 1
     clock.advance(1.0)
     _run(supervisor.send(RelayCommand(id=3, closed=False)))
-    assert len(transport.writes) == 2
+    assert any(
+        frame.get("cmd") == "relay" and frame.get("closed") is False
+        for frame in _frames(transport)
+    )
 
 
 def test_tick_starvation_enters_safe_state() -> None:
@@ -283,9 +300,11 @@ def test_relay_ack_timeout_enters_safe_state() -> None:
             (request_id, verdict)
         ),
     )
-    supervisor.track_pending("bbbbbbbb")
-    # Opening during safe-state entry must not recurse on a second timeout.
+    supervisor.track_pending("cccccccc")
+    supervisor.arm("bbbbbbbb", relay_gated=True)
+    _run(supervisor.send(ArmCommand(id=10, req="bbbbbbbb")))
+    # Closing after a matching approve must not recurse on a second timeout.
     with pytest.raises(AckTimeout):
-        _run(supervisor.send(RelayCommand(id=1, closed=True)))
+        _run(supervisor.on_event(ButtonEvent(which="approve", req="bbbbbbbb", t=1)))
     assert supervisor.healthy is False
-    assert resolved == [("bbbbbbbb", Verdict.LINK_LOST)]
+    assert resolved == [("cccccccc", Verdict.LINK_LOST)]
