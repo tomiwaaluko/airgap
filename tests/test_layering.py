@@ -32,3 +32,9 @@ def test_pure_core_imports_only_vocab() -> None:
 
 def test_vocab_has_no_internal_imports() -> None:
     assert not _internal_imports(SRC / "vocab.py")
+
+
+def test_warden_does_not_import_transport_or_supervisor() -> None:
+    imports = _internal_imports(SRC / "warden.py")
+    assert "airgap.transport" not in imports
+    assert "airgap.supervisor" not in imports
