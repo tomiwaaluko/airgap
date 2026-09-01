@@ -68,6 +68,12 @@ def _approve(*, req: str = RID, t: int = 1_000) -> ButtonEvent:
     return ButtonEvent(which="approve", req=req, t=t)
 
 
+def _deny(*, req: str = RID, t: int = 1_000, which: str = "deny") -> ButtonEvent:
+    if which == "never":
+        return ButtonEvent(which="never", req=req, t=t)
+    return ButtonEvent(which="deny", req=req, t=t)
+
+
 def _closes(transport: AutoAckTransport) -> list[dict[str, object]]:
     return [
         frame
@@ -235,6 +241,67 @@ def test_resolve_then_close_succeeds_because_armed_survives() -> None:
         i for i, item in enumerate(order) if item.startswith("write:relay:True")
     )
     assert resolve_at < close_at
+
+
+@pytest.mark.parametrize("which", ["deny", "never"])
+def test_deny_while_armed_resolves_denied_human_without_close(which: str) -> None:
+    supervisor, transport, _, resolves, audits, _, order = _make()
+    _arm_acked(supervisor, relay_gated=True)
+    _run(supervisor.on_event(_deny(t=200, which=which)))
+
+    assert resolves == [(RID, Verdict.DENIED, DecidedBy.HUMAN)]
+    assert _closes(transport) == []
+    assert not any(
+        frame.get("cmd") == "relay" and frame.get("closed") is True
+        for frame in _frames(transport)
+    )
+    audit_names = [event for event, _, _ in audits]
+    assert AuditEvent.BUTTON in audit_names
+    assert AuditEvent.RESOLVED in audit_names
+    resolved_payload = next(
+        payload for event, _, payload in audits if event == AuditEvent.RESOLVED
+    )
+    assert resolved_payload == {
+        "verdict": Verdict.DENIED,
+        "decided_by": DecidedBy.HUMAN,
+    }
+    button_payload = next(
+        payload for event, _, payload in audits if event == AuditEvent.BUTTON
+    )
+    assert button_payload == {"which": which}
+    audit_resolved = next(
+        i for i, item in enumerate(order) if item == f"audit:{AuditEvent.RESOLVED}"
+    )
+    resolve_at = next(i for i, item in enumerate(order) if item.startswith("resolve:"))
+    disarm_at = next(
+        i for i, item in enumerate(order) if item.startswith("write:disarm")
+    )
+    assert audit_resolved < disarm_at
+    assert resolve_at < disarm_at
+
+
+def test_mismatched_deny_does_not_resolve() -> None:
+    supervisor, transport, _, resolves, _, _, _ = _make()
+    _arm_acked(supervisor, relay_gated=True)
+    _run(supervisor.on_event(_deny(req=OTHER, t=200)))
+    assert resolves == []
+    assert _closes(transport) == []
+    _run(supervisor.on_event(_deny(t=200)))
+    assert resolves == [(RID, Verdict.DENIED, DecidedBy.HUMAN)]
+    assert _closes(transport) == []
+
+
+def test_deny_before_arm_ack_does_not_resolve() -> None:
+    supervisor, transport, _, resolves, _, _, _ = _make()
+    supervisor.arm(RID, relay_gated=True)
+    _run(supervisor.on_event(_tick(t=50, btns=0)))
+    _run(supervisor.on_event(_deny(t=50)))
+    assert resolves == []
+    assert _closes(transport) == []
+    _run(supervisor.send(ArmCommand(id=1, req=RID)))
+    _run(supervisor.on_event(_deny(t=200)))
+    assert resolves == [(RID, Verdict.DENIED, DecidedBy.HUMAN)]
+    assert _closes(transport) == []
 
 
 def test_mismatched_req_never_closes() -> None:

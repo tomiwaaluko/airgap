@@ -688,6 +688,20 @@ async def _deny_button() -> None:
             frame.get("cmd") == "relay" and frame.get("closed") is True
             for frame in _frames(harness.transport)
         )
+        button_at = next(
+            i
+            for i, (event, _, payload) in enumerate(harness.audits)
+            if event == AuditEvent.BUTTON and payload == {"which": "deny"}
+        )
+        resolved_at = next(
+            i
+            for i, (event, _, payload) in enumerate(harness.audits)
+            if event == AuditEvent.RESOLVED
+            and isinstance(payload, dict)
+            and payload.get("verdict") == Verdict.DENIED
+            and payload.get("decided_by") == DecidedBy.HUMAN
+        )
+        assert button_at < resolved_at
 
 
 def test_bind_host_is_loopback_only() -> None:

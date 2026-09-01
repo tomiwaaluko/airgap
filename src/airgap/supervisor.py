@@ -355,6 +355,9 @@ class Supervisor:
             times.popleft()
 
     async def _on_button(self, ev: ButtonEvent) -> None:
+        if ev.which in {"deny", "never"}:
+            await self._on_deny_or_never(ev)
+            return
         if ev.which != "approve":
             return
         self._seq += 1
@@ -366,6 +369,31 @@ class Supervisor:
             _log.warning("interlock rejected button: condition %s failed", failed)
             return
         await self._rule_4a()
+
+    async def _on_deny_or_never(self, ev: ButtonEvent) -> None:
+        """Deny is not Rule-4-gated; matching armed id after arm ack is enough."""
+        self._seq += 1
+        if (
+            self._armed is None
+            or ev.req != self._armed
+            or not self._arm_acked
+            or self._seq <= self._arm_ack_seq
+            or self._human_resolved
+        ):
+            return
+        request_id = self._armed
+        self._audit(AuditEvent.BUTTON, request_id, {"which": ev.which})
+        self._audit(
+            AuditEvent.RESOLVED,
+            request_id,
+            {"verdict": Verdict.DENIED, "decided_by": DecidedBy.HUMAN},
+        )
+        if self._on_resolve is not None:
+            self._on_resolve(request_id, Verdict.DENIED, DecidedBy.HUMAN)
+        self._human_resolved = True
+        if request_id in self._pending:
+            self._pending.remove(request_id)
+        await self._send_disarm()
 
     async def _rule_4a(self) -> None:
         if self._relay_gated:

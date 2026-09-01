@@ -249,12 +249,11 @@ class Broker:
         if isinstance(ev, BootEvent):
             await self._on_boot()
             return
-        if isinstance(ev, ButtonEvent) and ev.which in {"deny", "never"}:
-            await self._on_human_deny(ev)
-            return
         if isinstance(ev, TickEvent):
             self._dial = ev.dial
         await self.supervisor.on_event(ev)
+        if isinstance(ev, ButtonEvent) and ev.which in {"deny", "never"}:
+            self._on_human_deny(ev)
 
     async def feed_line(self, line: bytes) -> None:
         decoded = decode(line)
@@ -456,33 +455,18 @@ class Broker:
         )
         await self._disarm_device()
 
-    async def _on_human_deny(self, ev: ButtonEvent) -> None:
-        if ev.req is None or ev.req != self._armed_id:
+    def _on_human_deny(self, ev: ButtonEvent) -> None:
+        """Never-block is policy; Supervisor already minted the human verdict."""
+        if ev.which != "never" or ev.req is None:
             return
         row = self.store.get(ev.req)
-        if row is None or row.verdict is not None:
+        if (
+            row is None
+            or row.verdict != Verdict.DENIED
+            or row.decided_by != DecidedBy.HUMAN
+        ):
             return
-        self._audit(AuditEvent.BUTTON, row.id, {"which": ev.which})
-        reason = "user declined" if ev.which == "deny" else "never allow this tool"
-        self._audit(
-            AuditEvent.RESOLVED,
-            row.id,
-            {
-                "verdict": Verdict.DENIED,
-                "decided_by": DecidedBy.HUMAN,
-                "reason": reason,
-            },
-        )
-        self._finalize(
-            row,
-            Verdict.DENIED,
-            DecidedBy.HUMAN,
-            reason,
-            audit=False,
-        )
-        if ev.which == "never":
-            self._block_tool(row.tool_name)
-        await self._disarm_device()
+        self._block_tool(row.tool_name)
 
     def _apply_supervisor_resolve(
         self, request_id: str, verdict: str, decided_by: str
