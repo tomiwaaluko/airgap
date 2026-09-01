@@ -18,6 +18,7 @@ from airgap.protocol import (
     LedCommand,
     PingCommand,
     RelayCommand,
+    TickEvent,
     ToneCommand,
     encode,
 )
@@ -200,6 +201,11 @@ def test_lcd_rate_limit_drops_third_lcd_in_one_second() -> None:
 def test_relay_rate_limit_rejects_never_drops() -> None:
     supervisor, transport, clock, _ = _supervisor()
 
+    _run(
+        supervisor.on_event(
+            TickEvent(dial=5, relay=False, armed=False, lease_ms=0, btns=0, t=0)
+        )
+    )
     supervisor.arm("a91f3c2e", relay_gated=True)
     _run(supervisor.send(ArmCommand(id=10, req="a91f3c2e")))
     _run(supervisor.on_event(ButtonEvent(which="approve", req="a91f3c2e", t=1)))
@@ -301,6 +307,11 @@ def test_relay_ack_timeout_enters_safe_state() -> None:
         ),
     )
     supervisor.track_pending("cccccccc")
+    _run(
+        supervisor.on_event(
+            TickEvent(dial=5, relay=False, armed=False, lease_ms=0, btns=0, t=0)
+        )
+    )
     supervisor.arm("bbbbbbbb", relay_gated=True)
     _run(supervisor.send(ArmCommand(id=10, req="bbbbbbbb")))
     # Closing after a matching approve must not recurse on a second timeout.

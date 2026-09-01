@@ -310,7 +310,7 @@ class Supervisor:
             self._sent_tone.append(now)
         elif isinstance(cmd, LcdCommand):
             self._sent_lcd.append(now)
-        elif isinstance(cmd, RelayCommand):
+        elif isinstance(cmd, RelayCommand) and cmd.closed is True:
             self._sent_relay.append(now)
         await self._after_successful_write(cmd, ack)
         return ack
@@ -368,10 +368,10 @@ class Supervisor:
         await self._rule_4a()
 
     async def _rule_4a(self) -> None:
-        self._ensure_human_resolved()
         if self._relay_gated:
             await self.send(RelayCommand(id=self._internal_ids.next(), closed=True))
             return
+        self._ensure_human_resolved()
         self._approve_consumed = True
         await self._finish_without_relay()
 
@@ -386,10 +386,9 @@ class Supervisor:
             return 3
         if not self._arm_acked or self._approve_seq <= self._arm_ack_seq:
             return 4
-        if (
-            self._arm_acked_device_t is not None
-            and self._approve.t <= self._arm_acked_device_t
-        ):
+        if self._arm_acked_device_t is None:
+            return 4
+        if self._approve.t <= self._arm_acked_device_t:
             return 4
         if (
             self._approve_host_at is not None

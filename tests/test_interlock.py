@@ -451,6 +451,37 @@ def test_lease_expired_while_unarmed_touches_no_queued_request() -> None:
     assert supervisor.healthy is True
 
 
+def test_unarmed_lease_expired_open_does_not_block_gated_close() -> None:
+    supervisor, transport, _, resolves, audits, _, order = _make()
+    _run(supervisor.on_event(LeaseExpiredEvent(t=1)))
+    assert _opens(transport)
+
+    _arm_acked(supervisor, cmd_id=2)
+    _run(supervisor.on_event(_approve(t=200)))
+
+    assert _closes(transport)
+    assert resolves == [(RID, Verdict.APPROVED, DecidedBy.HUMAN)]
+    audit_resolved = next(
+        i for i, item in enumerate(order) if item == f"audit:{AuditEvent.RESOLVED}"
+    )
+    resolve_at = next(i for i, item in enumerate(order) if item.startswith("resolve:"))
+    close_at = next(
+        i for i, item in enumerate(order) if item.startswith("write:relay:True")
+    )
+    assert audit_resolved < close_at
+    assert resolve_at < close_at
+    assert AuditEvent.BUTTON in {event for event, _, _ in audits}
+
+
+def test_condition_4_fails_without_tick() -> None:
+    supervisor, transport, _, resolves, _, _, _ = _make()
+    supervisor.arm(RID, relay_gated=True)
+    _run(supervisor.send(ArmCommand(id=1, req=RID)))
+    _run(supervisor.on_event(_approve(req=RID, t=0)))
+    assert _closes(transport) == []
+    assert resolves == []
+
+
 def test_dead_time_and_buttons_released_required_before_next_arm() -> None:
     supervisor, transport, clock, resolves, _, _, _ = _make()
     _arm_acked(supervisor, relay_gated=False, dwell_s=60)
