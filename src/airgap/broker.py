@@ -78,6 +78,7 @@ class StoredRequest:
     reason: str | None = None
     short_code: str | None = None
     latency_ms: int | None = None
+    reasoning: str = ""
     event: asyncio.Event = field(default_factory=asyncio.Event)
 
 
@@ -306,6 +307,7 @@ class Broker:
             history=self._history(),
         )
         row.risk_class = triage.assessment.risk_class
+        row.reasoning = triage.assessment.reasoning
         if matched is not None:
             row.relay_gated = matched.relay_gated
             row.dwell_s = matched.dwell_s
@@ -560,6 +562,18 @@ class Broker:
                 return row
         return None
 
+    def _policy_payload(self, tool_name: str) -> dict[str, object] | None:
+        matched = self._match_policy(tool_name)
+        if matched is None:
+            return None
+        return {
+            "tool_pattern": matched.tool_pattern,
+            "min_dial": matched.min_dial,
+            "action": matched.action.value,
+            "relay_gated": matched.relay_gated,
+            "dwell_s": matched.dwell_s,
+        }
+
     def _policy_rules(self) -> list[PolicyRule]:
         return [
             PolicyRule(
@@ -607,10 +621,29 @@ class Broker:
             for request_id in self._queue
             if (row := self.store.get(request_id)) is not None and row.verdict is None
         ]
+        now = self._clock()
         return {
             "link": self.link_status(),
-            "armed": _pending_item(armed_row) if armed_row is not None else None,
-            "queue": [_pending_item(row, short_code=None) for row in queue_rows],
+            "armed": (
+                _pending_item(
+                    armed_row,
+                    dial=self._dial,
+                    now=now,
+                    policy=self._policy_payload(armed_row.tool_name),
+                )
+                if armed_row is not None
+                else None
+            ),
+            "queue": [
+                _pending_item(
+                    row,
+                    short_code=None,
+                    dial=self._dial,
+                    now=now,
+                    policy=self._policy_payload(row.tool_name),
+                )
+                for row in queue_rows
+            ],
         }
 
     def policies_payload(self) -> dict[str, object]:
@@ -734,13 +767,19 @@ def _mint_short_code(row: StoredRequest) -> str:
 
 
 def _pending_item(
-    row: StoredRequest, *, short_code: str | None | object = ...
+    row: StoredRequest,
+    *,
+    short_code: str | None | object = ...,
+    dial: int = 0,
+    now: float | None = None,
+    policy: dict[str, object] | None = None,
 ) -> dict[str, object]:
     code: str | None
     if short_code is ...:
         code = row.short_code
     else:
         code = short_code if isinstance(short_code, str) else None
+    stamp = row.created_at if now is None else now
     return {
         "request_id": row.id,
         "actor": row.actor,
@@ -750,6 +789,10 @@ def _pending_item(
         "risk_class": row.risk_class,
         "short_code": code,
         "relay_gated": row.relay_gated,
+        "reasoning": row.reasoning,
+        "dial": dial,
+        "elapsed_s": int(max(0.0, stamp - row.created_at)),
+        "policy": policy,
     }
 
 
