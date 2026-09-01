@@ -766,6 +766,45 @@ async def _csrf_required() -> None:
             ),
         )
         assert allowed.status_code == 200
+        rows = allowed.json()["policies"]
+        saved = next(row for row in rows if row["tool_pattern"] == "db.drop_table")
+        assert saved["updated_by"] == "ui"
+        assert saved["action"] == "block"
+
+
+def test_ui_put_policies_persists_updated_by_on_get() -> None:
+    _run(_updated_by_roundtrip())
+
+
+async def _updated_by_roundtrip() -> None:
+    harness = _harness()
+    async with _client(harness) as client:
+        await _startup(harness)
+        put = await client.put(
+            "/policies/db.drop_*",
+            json={
+                "action": "escalate",
+                "min_dial": 4,
+                "relay_gated": False,
+                "dwell_s": 30,
+            },
+            headers=_auth(
+                harness.ui,
+                Origin=UI_ORIGIN,
+                **{"X-CSRF-Token": harness.csrf_secret},
+            ),
+        )
+        assert put.status_code == 200
+        listed = await client.get("/policies", headers=_auth(harness.ui))
+        assert listed.status_code == 200
+        saved = next(
+            row
+            for row in listed.json()["policies"]
+            if row["tool_pattern"] == "db.drop_*"
+        )
+        assert saved["updated_by"] == "ui"
+        assert saved["min_dial"] == 4
+        assert saved["dwell_s"] == 30
 
 
 def test_boot_mid_request_is_denied_device_reset() -> None:

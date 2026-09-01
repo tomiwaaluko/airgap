@@ -111,6 +111,7 @@ class _PolicyRow:
     action: PolicyAction
     relay_gated: bool
     dwell_s: int = 60
+    updated_by: str = ""
 
 
 class ApprovalIn(BaseModel):
@@ -609,6 +610,7 @@ class Broker:
                 min_dial=0,
                 action=PolicyAction.BLOCK,
                 relay_gated=False,
+                updated_by="system",
             )
         )
 
@@ -655,6 +657,7 @@ class Broker:
                     "action": row.action.value,
                     "relay_gated": row.relay_gated,
                     "dwell_s": row.dwell_s,
+                    "updated_by": row.updated_by,
                 }
                 for row in self._policies
             ]
@@ -663,7 +666,6 @@ class Broker:
     def upsert_policy(
         self, pattern: str, update: PolicyUpdate, *, updated_by: str
     ) -> None:
-        del updated_by
         self._policies = [row for row in self._policies if row.tool_pattern != pattern]
         self._policies.append(
             _PolicyRow(
@@ -672,6 +674,7 @@ class Broker:
                 action=update.action,
                 relay_gated=update.relay_gated,
                 dwell_s=update.dwell_s,
+                updated_by=updated_by,
             )
         )
 
