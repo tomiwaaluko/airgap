@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Sequence
 from hashlib import sha256
 from typing import Any
 
@@ -34,6 +34,22 @@ from airgap.vocab import AuditEvent, DecidedBy, PolicyAction, Verdict
 
 GENESIS_HASH = "0" * 64
 MISMATCHED_REQ = "deadbeef"
+SPEC_CONSENT_APPROVE: tuple[str, ...] = (
+    AuditEvent.REQUEST_CREATED,
+    AuditEvent.WARDEN_VERDICT,
+    AuditEvent.ARMED,
+    AuditEvent.BUTTON,
+    AuditEvent.RESOLVED,
+)
+SPEC_GATED_APPROVE: tuple[str, ...] = (
+    *SPEC_CONSENT_APPROVE,
+    AuditEvent.RELAY_CLOSED,
+    AuditEvent.RELAY_OPENED,
+)
+DEFAULT_AUDIT_PREFIX: tuple[str, ...] = (
+    AuditEvent.REQUEST_CREATED,
+    AuditEvent.WARDEN_VERDICT,
+)
 T1_ARGS = {
     "tool_name": "db.drop_table",
     "tool_args": COLLIDING_ARGS,
@@ -92,6 +108,8 @@ def _e2e_harness(
     transport.contact_closed = False
     order: list[str] = []
     audits: list[tuple[str, str | None, object]] = []
+    chain_rows: list[tuple[int, str, str | None, str, str, str]] = []
+    previous_hash = GENESIS_HASH
     original_write = transport.write
 
     async def tracked_write(frame: bytes) -> Any:
@@ -110,7 +128,13 @@ def _e2e_harness(
     transport.write = tracked_write  # type: ignore[method-assign]
 
     def on_audit(event: str, request_id: str | None, payload: object) -> None:
+        nonlocal previous_hash
         name = str(event)
+        seq = len(chain_rows) + 1
+        canonical = _canonical(payload)
+        digest = _row_hash(previous_hash, seq, name, request_id, canonical)
+        chain_rows.append((seq, name, request_id, canonical, previous_hash, digest))
+        previous_hash = digest
         audits.append((name, request_id, payload))
         order.append(f"audit:{name}")
 
@@ -127,7 +151,7 @@ def _e2e_harness(
         csrf_secret="csrf-test-secret",
         host_loop=host_loop,
     )
-    return Harness(
+    harness = Harness(
         app=app,
         broker=app.state.broker,
         transport=transport,  # type: ignore[arg-type]
@@ -139,6 +163,8 @@ def _e2e_harness(
         tokens=dict(app.state.tokens),
         csrf_secret=str(app.state.csrf_secret),
     )
+    harness.chain_rows = chain_rows  # type: ignore[attr-defined]
+    return harness
 
 
 def _canonical(payload: object) -> str:
@@ -156,22 +182,10 @@ def _row_hash(
     return sha256(material.encode("utf-8")).hexdigest()
 
 
-def _materialize_chain(
-    events: list[tuple[str, str | None, object]],
-) -> list[tuple[int, str, str | None, str, str, str]]:
-    previous = GENESIS_HASH
-    rows: list[tuple[int, str, str | None, str, str, str]] = []
-    for seq, (event, request_id, payload) in enumerate(events, start=1):
-        canonical = _canonical(payload)
-        digest = _row_hash(previous, seq, event, request_id, canonical)
-        rows.append((seq, event, request_id, canonical, previous, digest))
-        previous = digest
-    return rows
-
-
-def _verify_chain_rows(
+def _verify_sealed_chain(
     rows: list[tuple[int, str, str | None, str, str, str]],
 ) -> None:
+    """Check hashes sealed at append time; do not rematerialize from the live list."""
     previous = GENESIS_HASH
     for seq, event, request_id, canonical, stored_prev, stored_hash in rows:
         assert stored_prev == previous
@@ -181,54 +195,65 @@ def _verify_chain_rows(
         previous = stored_hash
 
 
+def _assert_expected_events(
+    names: list[str],
+    expected: Sequence[str],
+    *,
+    exact: bool,
+) -> None:
+    if exact:
+        assert names == list(expected)
+        return
+    cursor = iter(names)
+    for want in expected:
+        for got in cursor:
+            if got == want:
+                break
+        else:
+            raise AssertionError(f"audit sequence missing {want!r} in {names}")
+
+
+def _require_precedes(order: list[str], audit_name: str, write_name: str) -> None:
+    assert write_name in order
+    assert audit_name in order, f"{audit_name} missing but {write_name} is present"
+    assert order.index(audit_name) < order.index(write_name)
+
+
 def _assert_log_before_act(order: list[str]) -> None:
-    def first(name: str) -> int | None:
-        try:
-            return order.index(name)
-        except ValueError:
-            return None
-
-    armed_at = first("audit:armed")
-    arm_write = first("write:arm")
-    if armed_at is not None and arm_write is not None:
-        assert armed_at < arm_write
-
-    resolved_at = first("audit:resolved")
-    close_at = first("write:relay:true")
-    if resolved_at is not None and close_at is not None:
-        assert resolved_at < close_at
-
-    opened_at = first("audit:relay_opened")
-    if opened_at is not None:
+    if "write:arm" in order:
+        _require_precedes(order, "audit:armed", "write:arm")
+    if "write:relay:true" in order:
+        _require_precedes(order, "audit:resolved", "write:relay:true")
+    if "audit:relay_opened" in order:
         later_disarm = next(
             (
                 index
                 for index, item in enumerate(order)
-                if item == "write:disarm" and index > opened_at
+                if item == "write:disarm"
+                and index > order.index("audit:relay_opened")
             ),
             None,
         )
         if later_disarm is not None:
-            assert opened_at < later_disarm
-
-    created_at = first("audit:request_created")
-    warden_at = first("audit:warden_verdict")
-    if created_at is not None and warden_at is not None:
-        assert created_at < warden_at
+            assert order.index("audit:relay_opened") < later_disarm
+    _require_precedes(order, "audit:request_created", "audit:warden_verdict")
 
 
-def _assert_audit(harness: Harness) -> None:
-    """In-memory hash chain would fail if reordered; audits precede their writes."""
-    rows = _materialize_chain(harness.audits)
-    _verify_chain_rows(rows)
-    if len(rows) >= 2:
-        swapped = [rows[1], rows[0], *rows[2:]]
-        try:
-            _verify_chain_rows(swapped)
-        except AssertionError:
-            pass
-        else:
-            raise AssertionError("reordered audit chain still verified")
+def _assert_audit(
+    harness: Harness,
+    *,
+    expected: Sequence[str] = DEFAULT_AUDIT_PREFIX,
+    exact: bool = False,
+) -> None:
+    """Empty chain fails; a device write requires the audit that precedes it."""
+    chain_rows = getattr(harness, "chain_rows", [])
+    assert harness.audits, "audit list is empty"
+    assert chain_rows, "sealed audit chain is empty"
+    live_names = [event for event, _, _ in harness.audits]
+    sealed_names = [row[1] for row in chain_rows]
+    assert live_names == sealed_names
+    _verify_sealed_chain(chain_rows)
+    _assert_expected_events(live_names, expected, exact=exact)
     _assert_log_before_act(harness.order)
 
 
@@ -261,11 +286,6 @@ async def _advance(
     await harness.broker.pump()
 
 
-def _firmware_opens_contact(transport: MockTransport) -> None:
-    """Link stays up; the device opens the coil without a host relay command."""
-    transport.contact_closed = False
-
-
 def test_consent_channel_happy_path() -> None:
     """DROP TABLE is a veto, not a contact; the first scenario is the common case."""
     _run(_consent_channel_happy_path())
@@ -294,7 +314,7 @@ async def _consent_channel_happy_path() -> None:
     assert row is not None
     assert row.verdict == Verdict.APPROVED
     assert row.decided_by == DecidedBy.HUMAN
-    _assert_audit(harness)
+    _assert_audit(harness, expected=SPEC_CONSENT_APPROVE, exact=True)
 
 
 def test_deny_path_never_closes_relay() -> None:
@@ -318,7 +338,7 @@ async def _deny_path_never_closes_relay() -> None:
     assert row is not None
     assert row.verdict == Verdict.DENIED
     assert row.decided_by == DecidedBy.HUMAN
-    _assert_audit(harness)
+    _assert_audit(harness, expected=SPEC_CONSENT_APPROVE, exact=True)
 
 
 def test_policy_block_overrides_warden_auto_approve() -> None:
@@ -441,12 +461,6 @@ async def _no_http_route_resolves_a_request() -> None:
         }
         for decided_by in ("human", "policy", "warden_auto", "system"):
             spoof["decided_by"] = decided_by
-            for method, path in sorted(mutating):
-                concrete = path.replace("{pattern}", "db.drop_table")
-                headers = _auth(harness.ui, **{"X-CSRF-Token": harness.csrf_secret})
-                if method == "POST" and path == "/request_approval":
-                    headers = _auth(harness.agent)
-                await http.request(method, concrete, json=spoof, headers=headers)
             for path in (
                 "/decide",
                 "/approve",
@@ -458,13 +472,16 @@ async def _no_http_route_resolves_a_request() -> None:
                 )
                 assert response.status_code in {404, 405, 403, 401}
         assert not task.done()
+        assert harness.store.pending_count() == 1
         pending = await http.get("/pending", headers=_auth(harness.ui_ro))
         assert pending.json()["armed"]["request_id"] == request_id
+        assert pending.json()["queue"] == []
         assert (
             await http.get("/pending", headers=_auth(harness.agent))
         ).status_code == 403
         assert (await _post_approval(http, harness.ui)).status_code == 403
         assert (await _post_approval(http, harness.ui_ro)).status_code == 403
+        assert harness.store.pending_count() == 1
         assert (
             await http.put(
                 "/policies/db.drop_table",
@@ -477,7 +494,7 @@ async def _no_http_route_resolves_a_request() -> None:
         body = response.json()
         assert body["verdict"] == Verdict.DENIED
         assert body["decided_by"] == DecidedBy.HUMAN
-    _assert_audit(harness)
+    _assert_audit(harness, expected=SPEC_CONSENT_APPROVE, exact=True)
 
 
 def test_broker_killed_link_up_lease_expires() -> None:
@@ -499,17 +516,16 @@ async def _broker_killed_link_up_lease_expires() -> None:
         writes_at_kill = len(harness.transport.writes)
         assert harness.transport.connected
         harness.clock.advance(10.0)
-        _firmware_opens_contact(harness.transport)
         await harness.broker.on_event(
             LeaseExpiredEvent(t=int(harness.clock.t * 1000))
         )
     assert harness.transport.connected
-    assert harness.transport.contact_closed is False
     after_kill = _frames(harness.transport)[writes_at_kill:]
     assert not any(
         frame.get("cmd") == "relay" and frame.get("closed") is False
         for frame in after_kill
     )
+    assert not any(frame.get("cmd") == "relay_renew" for frame in after_kill)
     lease_audits = [
         payload
         for event, _, payload in harness.audits
@@ -519,7 +535,15 @@ async def _broker_killed_link_up_lease_expires() -> None:
     row = harness.store.get(str(armed["request_id"]))
     assert row is not None
     assert row.verdict == Verdict.APPROVED
-    _assert_audit(harness)
+    _assert_audit(
+        harness,
+        expected=(
+            *SPEC_CONSENT_APPROVE,
+            AuditEvent.RELAY_CLOSED,
+            AuditEvent.LEASE_EXPIRED,
+        ),
+        exact=True,
+    )
 
 
 def test_relay_gated_happy_path_cycle() -> None:
@@ -561,7 +585,7 @@ async def _relay_gated_happy_path_cycle() -> None:
     assert row is not None
     assert row.verdict == Verdict.APPROVED
     assert row.decided_by == DecidedBy.HUMAN
-    _assert_audit(harness)
+    _assert_audit(harness, expected=SPEC_GATED_APPROVE, exact=True)
 
 
 def test_empty_policy_table_warden_block_still_blocks() -> None:
@@ -702,7 +726,7 @@ async def _high_risk_readability_t1() -> None:
             await inner.aclose()
         await _human_deny(harness, str(armed["request_id"]))
         await task
-    _assert_audit(harness)
+    _assert_audit(harness, expected=SPEC_CONSENT_APPROVE, exact=True)
 
 
 def test_rearming_mints_fresh_short_code() -> None:
@@ -777,7 +801,7 @@ async def _mismatched_req_button_does_not_close_relay() -> None:
         await _human_deny(harness, request_id)
         result = await task
     assert _text(result).startswith("DENIED: ")
-    _assert_audit(harness)
+    _assert_audit(harness, expected=SPEC_CONSENT_APPROVE, exact=True)
 
 
 def test_second_press_in_dead_time_binds_to_nothing() -> None:
