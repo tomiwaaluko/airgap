@@ -9,7 +9,7 @@ from collections.abc import Mapping, Sequence
 from typing import Annotated, Any, Literal, cast
 
 import httpx
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import MCPServer  # type: ignore[import-not-found]
 from pydantic import Field
 
 # Verbatim from spec/03 — this is what tells an actor to call before acting.
@@ -60,7 +60,7 @@ def create_server(
     resolved_actor = actor or f"mcp/{uuid.uuid4().hex[:8]}"
     server = MCPServer("airgap")
 
-    @server.tool(description=TOOL_DESCRIPTION, structured_output=False)
+    @server.tool(description=TOOL_DESCRIPTION, structured_output=False)  # type: ignore[untyped-decorator]
     async def request_approval(
         tool_name: Annotated[str, Field(description=_TOOL_NAME_DESC)],
         justification: Annotated[str, Field(description=_JUSTIFICATION_DESC)],

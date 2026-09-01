@@ -1,23 +1,41 @@
 """Reject removed implementation surfaces without linting explanatory prose."""
 
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
-IMPLEMENTATION_ROOTS = (ROOT / "src", ROOT / "tests")
+SRC_ROOT = ROOT / "src"
+TESTS_ROOT = ROOT / "tests"
 BROKER_SPEC = ROOT / "docs" / "spec" / "03-broker-api.md"
-REMOVED_ROUTES = ("/" "decide",)
+REMOVED_ROUTES = ("/decide",)
+# A probe POST to a missing path is AIR-14. A decorator that serves it is AIR-16.
+_ROUTE_REGISTRATION = re.compile(
+    r"@(?:app|router)\.(?:get|post|put|patch|delete)\(|"
+    r"add_api_route\(|"
+    r"APIRouter\("
+)
 
 
-def _python_source_hits(roots: tuple[Path, ...], term: str) -> list[str]:
+def _python_source_hits(term: str) -> list[str]:
     hits: list[str] = []
-    for root in roots:
-        for path in root.rglob("*.py"):
-            for line_number, line in enumerate(
-                path.read_text(encoding="utf-8").splitlines(), start=1
-            ):
-                if term in line:
-                    location = f"{path.relative_to(ROOT)}:{line_number}"
-                    hits.append(f"{location}: {line.strip()}")
+    for path in SRC_ROOT.rglob("*.py"):
+        hits.extend(_line_hits(path, term, require_registration=False))
+    for path in TESTS_ROOT.rglob("*.py"):
+        hits.extend(_line_hits(path, term, require_registration=True))
+    return hits
+
+
+def _line_hits(path: Path, term: str, *, require_registration: bool) -> list[str]:
+    hits: list[str] = []
+    for line_number, line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
+        if term not in line:
+            continue
+        if require_registration and _ROUTE_REGISTRATION.search(line) is None:
+            continue
+        location = f"{path.relative_to(ROOT)}:{line_number}"
+        hits.append(f"{location}: {line.strip()}")
     return hits
 
 
@@ -36,7 +54,7 @@ def test_removed_routes_do_not_reappear_in_implementation() -> None:
     for route in REMOVED_ROUTES:
         failures.extend(
             f"removed route {route!r} appears in {hit}"
-            for hit in _python_source_hits(IMPLEMENTATION_ROOTS, route)
+            for hit in _python_source_hits(route)
         )
 
     assert not failures, "\n".join(failures)
