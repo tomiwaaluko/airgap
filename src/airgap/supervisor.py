@@ -6,7 +6,8 @@ import logging
 import re
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import cast
 
 from airgap.protocol import (
     Ack,
@@ -186,6 +187,16 @@ class Supervisor:
         self._unparseable = 0
         if isinstance(decoded, (ButtonEvent, BootEvent, LeaseExpiredEvent, TickEvent)):
             await self.on_event(decoded)
+
+    async def serve_link(
+        self,
+        feed: Callable[[bytes], Awaitable[None]] | None = None,
+    ) -> None:
+        """Broker cannot import transport; this is the only drain off the wire."""
+        handler = self.feed_line if feed is None else feed
+        lines = cast(AsyncIterator[bytes], self._transport.read_lines())
+        async for line in lines:
+            await handler(line)
 
     async def check_watchdog(self) -> None:
         if self._in_safe_state:

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import secrets
+import time
 from collections import defaultdict, deque
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -771,6 +773,49 @@ def _route_path(request: Request) -> str:
     return request.url.path
 
 
+_HOST_PUMP_PERIOD_S = 0.05
+
+
+def _host_pump_delay_s(clock: Callable[[], float]) -> float:
+    """Frozen test clocks must not introduce a wall-clock sleep into pytest."""
+    if clock is time.monotonic:
+        return _HOST_PUMP_PERIOD_S
+    return 0.0
+
+
+async def _run_host_loop(broker: Broker) -> None:
+    """uvicorn never calls pump; this task is the production watchdog and wire drain."""
+    serve = asyncio.create_task(broker.supervisor.serve_link(broker.feed_line))
+    try:
+        while True:
+            await broker.pump()
+            if serve.done():
+                await serve
+            delay = _host_pump_delay_s(broker._clock)
+            await asyncio.sleep(delay)
+    finally:
+        if not serve.done():
+            serve.cancel()
+            with suppress(asyncio.CancelledError):
+                await serve
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    broker: Broker = app.state.broker
+    task: asyncio.Task[None] | None = None
+    if app.state.host_loop:
+        await broker.startup()
+        task = asyncio.create_task(_run_host_loop(broker), name="airgap-host-loop")
+    try:
+        yield
+    finally:
+        if task is not None:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
+
 def create_app(
     *,
     supervisor: Supervisor,
@@ -784,6 +829,7 @@ def create_app(
     store: RequestStore | None = None,
     csrf_secret: str | None = None,
     tokens: Mapping[str, str] | None = None,
+    host_loop: bool = False,
 ) -> FastAPI:
     """Build a FastAPI app with injected doubles; tokens are minted if omitted."""
 
@@ -806,8 +852,10 @@ def create_app(
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
+        lifespan=_lifespan,
     )
     app.state.broker = broker
+    app.state.host_loop = host_loop
     app.state.tokens = dict(broker.tokens_by_scope)
     app.state.csrf_secret = broker.csrf_secret
     app.state.bind_host = BIND_HOST
@@ -866,7 +914,8 @@ def create_app(
 
 
 def run(app: FastAPI, *, port: int = 8741) -> None:
-    """Bind loopback only; never 0.0.0.0."""
+    """Bind loopback only; never 0.0.0.0. Enables startup + the device loop."""
     import uvicorn
 
+    app.state.host_loop = True
     uvicorn.run(app, host=BIND_HOST, port=port)

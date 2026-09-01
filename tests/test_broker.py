@@ -105,6 +105,7 @@ def _harness(
     store: RequestStore | None = None,
     expiry_s: float = 30 * 60,
     dial: int = 0,
+    host_loop: bool = False,
 ) -> Harness:
     clock = Clock()
     transport = AutoAckTransport()
@@ -136,6 +137,7 @@ def _harness(
         expiry_s=expiry_s,
         store=store,
         csrf_secret="csrf-test-secret",
+        host_loop=host_loop,
     )
     return Harness(
         app=app,
@@ -561,6 +563,33 @@ async def _tick_starvation_link_lost() -> None:
 
 def test_startup_marks_pending_link_lost() -> None:
     _run(_startup_recovery())
+
+
+def test_host_loop_lifespan_runs_startup_without_manual_call() -> None:
+    _run(_host_loop_lifespan_startup())
+
+
+async def _host_loop_lifespan_startup() -> None:
+    store = RequestStore()
+    seeded = StoredRequest(
+        id="abcd1234",
+        actor="claude-code/session-4f2a",
+        tool_name="db.drop_table",
+        tool_args={"table": "users_backup"},
+        justification="left over",
+        risk_class="high",
+        relay_gated=False,
+        dwell_s=60,
+        created_at=0.0,
+    )
+    store.put(seeded)
+    harness = _harness(store=store, host_loop=True)
+    assert harness.app.state.host_loop is True
+    async with harness.app.router.lifespan_context(harness.app):
+        row = store.get("abcd1234")
+        assert row is not None
+        assert row.verdict == Verdict.LINK_LOST
+        assert row.decided_by == DecidedBy.SYSTEM
 
 
 async def _startup_recovery() -> None:
