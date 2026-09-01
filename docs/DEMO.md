@@ -36,12 +36,16 @@ uv sync
 
 ## 2. Postgres
 
-Create a database, then export an explicit pg8000 URL. Bare `postgresql://`
-selects a driver this project does not ship.
+Create the role and database, then export an explicit pg8000 URL. Bare
+`postgresql://` selects a driver this project does not ship. The connecting
+`psql` user must be a superuser (often `postgres`). If the role or database
+already exists, skip that statement.
 
 POSIX:
 
 ```text
+psql -U postgres -h 127.0.0.1 -c "CREATE ROLE airgap WITH LOGIN PASSWORD 'airgap';"
+psql -U postgres -h 127.0.0.1 -c "CREATE DATABASE airgap OWNER airgap;"
 export DATABASE_URL=postgresql+pg8000://airgap:airgap@127.0.0.1:5432/airgap
 uv run alembic upgrade head
 ```
@@ -49,6 +53,8 @@ uv run alembic upgrade head
 PowerShell:
 
 ```text
+psql -U postgres -h 127.0.0.1 -c "CREATE ROLE airgap WITH LOGIN PASSWORD 'airgap';"
+psql -U postgres -h 127.0.0.1 -c "CREATE DATABASE airgap OWNER airgap;"
 $env:DATABASE_URL = "postgresql+pg8000://airgap:airgap@127.0.0.1:5432/airgap"
 uv run alembic upgrade head
 ```
@@ -80,22 +86,22 @@ Mint three secrets and keep them in this shell. Scopes are not interchangeable:
 POSIX:
 
 ```text
-export AIRGAP_AGENT_TOKEN="$(python -c "import secrets; print(secrets.token_urlsafe(32))")"
-export AIRGAP_UI_TOKEN="$(python -c "import secrets; print(secrets.token_urlsafe(32))")"
-export AIRGAP_UI_RO_TOKEN="$(python -c "import secrets; print(secrets.token_urlsafe(32))")"
+export AIRGAP_AGENT_TOKEN="$(uv run python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+export AIRGAP_UI_TOKEN="$(uv run python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+export AIRGAP_UI_RO_TOKEN="$(uv run python -c 'import secrets; print(secrets.token_urlsafe(32))')"
 export BROKER_URL=http://127.0.0.1:8741
 ```
 
 PowerShell:
 
 ```text
-$env:AIRGAP_AGENT_TOKEN = $(python -c "import secrets; print(secrets.token_urlsafe(32))")
-$env:AIRGAP_UI_TOKEN = $(python -c "import secrets; print(secrets.token_urlsafe(32))")
-$env:AIRGAP_UI_RO_TOKEN = $(python -c "import secrets; print(secrets.token_urlsafe(32))")
+$env:AIRGAP_AGENT_TOKEN = $(uv run python -c "import secrets; print(secrets.token_urlsafe(32))")
+$env:AIRGAP_UI_TOKEN = $(uv run python -c "import secrets; print(secrets.token_urlsafe(32))")
+$env:AIRGAP_UI_RO_TOKEN = $(uv run python -c "import secrets; print(secrets.token_urlsafe(32))")
 $env:BROKER_URL = "http://127.0.0.1:8741"
 ```
 
-Pass the same three values into `create_app(..., tokens={...})` below. The
+`scripts/run_broker.py` reads the three tokens from the environment. The
 dashboard uses `AIRGAP_UI_TOKEN`. `airgap watch` uses `AIRGAP_UI_RO_TOKEN`.
 The MCP process uses `AIRGAP_AGENT_TOKEN`. None of them can resolve a request.
 
@@ -111,8 +117,9 @@ the two-pin LED, and the flag servo. Prints a GREEN / RED summary.
 - **No Arduino:** exits non-zero with a red `Arduino serial device is absent`.
   That is the correct result on this software-half ticket.
 - **After AIR-5:** set `AIRGAP_SERIAL_PORT` (for example `COM3` or
-  `/dev/ttyACM0`). Preflight talks through `Supervisor.send` — ping, LED amber
-  then off, flag up, `relay(closed=false)`. It never closes the contact.
+  `/dev/ttyACM0`). Opening the port resets a typical UNO; preflight waits up
+  to 3 s for a `boot` frame before ping. Then `Supervisor.send` — ping, LED
+  amber then off, flag up, `relay(closed=false)`. It never closes the contact.
   Passing preflight is not passing bring-up items 6 and 7.
 
 ## 6. Hardware (AIR-5 — skip until the board exists)
@@ -140,83 +147,27 @@ uv run python -c "from airgap.broker import BIND_HOST; print(BIND_HOST)"
 must print `127.0.0.1`.
 
 Start the broker with the public constructors (Supervisor owns the port; the
-LLM never writes to serial). Load the seeded policy rows and resolved
-`db.drop_table` history so the Warden's `search_decision_history` tool has
-something to find:
+LLM never writes to serial). `scripts/run_broker.py` loads seeded policy rows
+and resolved `db.drop_table` history into `RequestStore` so the Warden's
+`search_decision_history` tool has something to find without pasting a
+launcher. It fails closed if `AIRGAP_SERIAL_PORT` is missing.
 
-```python
-import os
-from sqlalchemy import select
-from anthropic import Anthropic
-from airgap.audit import append
-from airgap.broker import RequestStore, StoredRequest, create_app, run
-from airgap.models import Policy, Request, session_factory
-from airgap.policy import PolicyRule
-from airgap.supervisor import Supervisor
-from airgap.transport import SerialTransport
-from airgap.vocab import AuditEvent, PolicyAction
-from airgap.warden import Warden
-
-port = os.environ["AIRGAP_SERIAL_PORT"]
-tokens = {
-    "agent": os.environ["AIRGAP_AGENT_TOKEN"],
-    "ui": os.environ["AIRGAP_UI_TOKEN"],
-    "ui_ro": os.environ["AIRGAP_UI_RO_TOKEN"],
-}
-factory = session_factory()
-session = factory()
-rules = [
-    PolicyRule(
-        tool_pattern=row.tool_pattern,
-        min_dial=row.min_dial,
-        action=PolicyAction(row.action),
-        relay_gated=row.relay_gated,
-    )
-    for row in session.scalars(select(Policy))
-]
-store = RequestStore()
-for row in session.scalars(select(Request)):
-    if row.verdict is None:
-        continue
-    store.put(
-        StoredRequest(
-            id=row.id,
-            actor=row.actor,
-            tool_name=row.tool_name,
-            tool_args=dict(row.tool_args),
-            justification=row.justification,
-            risk_class=row.risk_class,
-            relay_gated=False,
-            dwell_s=60,
-            created_at=0.0,
-            verdict=row.verdict,
-            decided_by=row.decided_by,
-            reason=row.reason or "",
-        )
-    )
-
-def on_audit(event: str, request_id: str | None, payload: object) -> None:
-    append(AuditEvent(event), request_id, payload)
-
-app = create_app(
-    supervisor=Supervisor(SerialTransport(port)),
-    warden=Warden(Anthropic(), session),
-    on_audit=on_audit,
-    clock=__import__("time").monotonic,
-    policies=rules,
-    store=store,
-    tokens=tokens,
-    origin_allowlist=("http://127.0.0.1:3000",),
-    host_loop=True,
-)
-run(app, port=8741)
+```text
+# POSIX
+export AIRGAP_SERIAL_PORT=/dev/ttyACM0
+uv run python scripts/run_broker.py
 ```
 
-Save that as a local throwaway if you prefer not to paste `-c`. Bind stays
-`127.0.0.1` inside `run()`.
+```text
+# PowerShell
+$env:AIRGAP_SERIAL_PORT = "COM3"
+uv run python scripts/run_broker.py
+```
 
-`ANTHROPIC_API_KEY` is required for a live Warden. If the Warden is
-unavailable it fails closed to escalate — the human path still works.
+Bind stays `127.0.0.1` inside `run()`. Requires `DATABASE_URL`, the three
+tokens from §4, `AIRGAP_SERIAL_PORT`, and `ANTHROPIC_API_KEY` for a live
+Warden. If the Warden is unavailable it fails closed to escalate — the human
+path still works.
 
 ## 8. MCP `request_approval`
 
@@ -226,9 +177,26 @@ Second terminal, same tokens and `BROKER_URL`:
 uv run python -m airgap.mcp_server
 ```
 
-Point an MCP client at that process. The tool description is the one in
-[`spec/03`](spec/03-broker-api.md). The call **blocks** until a verdict exists.
-That is the product, not a hang.
+Point an MCP client at that process. One-liner for Claude Code / Cursor
+(`mcp.json`; same clone directory; token from §4):
+
+```json
+{
+  "mcpServers": {
+    "airgap": {
+      "command": "uv",
+      "args": ["run", "python", "-m", "airgap.mcp_server"],
+      "env": {
+        "BROKER_URL": "http://127.0.0.1:8741",
+        "AIRGAP_AGENT_TOKEN": "<AIRGAP_AGENT_TOKEN from §4>"
+      }
+    }
+  }
+}
+```
+
+The tool description is the one in [`spec/03`](spec/03-broker-api.md). The
+call **blocks** until a verdict exists. That is the product, not a hang.
 
 Consent-channel demo arguments (no relay):
 
@@ -242,9 +210,23 @@ Consent-channel demo arguments (no relay):
 
 ## 9. `airgap watch`
 
-Third terminal:
+Third terminal. `run_watch()` requires `AIRGAP_UI_RO_TOKEN`; set the same
+values as §4. Read the full armed action here — the high-risk LCD is only
+the short code plus `SEE READER`.
+
+POSIX:
 
 ```text
+export BROKER_URL=http://127.0.0.1:8741
+export AIRGAP_UI_RO_TOKEN="<same value as §4>"
+uv run airgap watch
+```
+
+PowerShell:
+
+```text
+$env:BROKER_URL = "http://127.0.0.1:8741"
+$env:AIRGAP_UI_RO_TOKEN = "<same value as §4>"
 uv run airgap watch
 ```
 
@@ -272,11 +254,13 @@ cannot mint `decided_by=human`.
 
 Speak this once, in order, while a cold observer watches the desk and
 `airgap watch`. Do not narrate the relay. This request is not relay-gated.
+`db.drop_table` is high-risk: the LCD does **not** show the DROP. Read the
+action on `airgap watch`.
 
 | t | What happens |
 |---|---|
 | 0 s | The actor calls `request_approval` for `db.drop_table` / `users_backup`. The MCP tool call **blocks**. |
-| 2 s | Flag up, LED red (D6), alert tone, LCD shows the DROP. **Relay stays open.** No `relay` command is sent. |
+| 2 s | Flag up, LED red (D6), alert tone. LCD line 1 is the per-arm short code; line 2 is `SEE READER`. Read the full action on `airgap watch`. **Relay stays open.** No `relay` command is sent. |
 | 8 s | `airgap watch` shows tool, args, justification. The optional dashboard shows the same queue. Neither surface can approve. |
 | 20 s | Human presses **APPROVE on the device** (D2). Not the dashboard. Not a token. |
 | 22 s | LED green (D5). The blocking call returns `APPROVED: ...`. |

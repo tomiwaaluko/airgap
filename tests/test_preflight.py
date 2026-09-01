@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import sys
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
@@ -12,6 +14,8 @@ import pytest
 from airgap.protocol import Ack
 from airgap.transport import AckTimeout, MockTransport
 from airgap.vocab import CommandName
+
+_BOOT = b'{"ev":"boot","fw":"1.0.0","t":12}\n'
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
@@ -83,6 +87,7 @@ def test_wrong_database_url_prefix_is_red() -> None:
 def test_mock_device_that_acks_is_green_for_hardware() -> None:
     transport = MockTransport(
         [
+            _BOOT,
             b'{"id":1,"ok":true}\n',
             b'{"id":2,"ok":true}\n',
             b'{"id":3,"ok":true}\n',
@@ -114,9 +119,52 @@ def test_mock_device_ping_timeout_fails_serial() -> None:
 
     code, text = _run(
         postgres=preflight.Check("Postgres", True, "reachable"),
-        open_transport=lambda: TimeoutTransport(),
+        open_transport=lambda: TimeoutTransport([_BOOT]),
     )
     assert code != 0
     assert "Serial" in text
     serial_line = next(line for line in text.splitlines() if "Serial" in line)
     assert serial_line.startswith("RED")
+
+
+def test_mock_device_that_never_boots_fails_closed() -> None:
+    transport = MockTransport(
+        [
+            b'{"id":1,"ok":true}\n',
+            b'{"id":2,"ok":true}\n',
+        ]
+    )
+    code, text = _run(
+        postgres=preflight.Check("Postgres", True, "reachable"),
+        open_transport=lambda: transport,
+    )
+    assert code != 0
+    assert preflight.NO_BOOT in text
+    serial_line = next(line for line in text.splitlines() if "Serial" in line)
+    assert serial_line.startswith("RED")
+    assert transport.writes == []
+
+
+def test_silent_transport_boot_wait_times_out() -> None:
+    class SilentTransport:
+        def __init__(self) -> None:
+            self._closed = False
+
+        @property
+        def connected(self) -> bool:
+            return not self._closed
+
+        async def write(self, frame: bytes) -> Ack:
+            raise AckTimeout("silent")
+
+        async def read_lines(self) -> AsyncIterator[bytes]:
+            while self.connected:
+                await asyncio.sleep(0)
+            yield b""
+
+        def close(self) -> None:
+            self._closed = True
+
+    err = asyncio.run(preflight.wait_for_boot(SilentTransport(), timeout_s=0.05))
+    assert err is not None
+    assert "boot" in err.lower()

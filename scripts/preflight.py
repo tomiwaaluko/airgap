@@ -12,17 +12,21 @@ from typing import TextIO
 from sqlalchemy import create_engine, text
 
 from airgap.protocol import (
+    BootEvent,
     Command,
     FlagCommand,
     LedCommand,
     PingCommand,
     RelayCommand,
+    decode,
 )
 from airgap.supervisor import Supervisor, SupervisorRejection
 from airgap.transport import AckTimeout, SerialTransport, Transport
 from airgap.vocab import LedState
 
 DEVICE_ABSENT = "Arduino serial device is absent"
+NO_BOOT = "no boot frame after serial open (UNO typically resets on open)"
+BOOT_WAIT_S = 3.0
 _POSTGRES_PREFIX = "postgresql+pg8000://"
 
 
@@ -95,8 +99,45 @@ async def _send(supervisor: Supervisor, command: Command) -> str | None:
     return None
 
 
-async def probe_hardware(transport: Transport) -> list[Check]:
+async def wait_for_boot(
+    transport: Transport, *, timeout_s: float = BOOT_WAIT_S
+) -> str | None:
+    """Drain until a boot event, or fail closed. No time.sleep()."""
+
+    async def _drain() -> bool:
+        async for line in transport.read_lines():
+            decoded = decode(line)
+            if isinstance(decoded, BootEvent):
+                return True
+        return False
+
+    try:
+        found = await asyncio.wait_for(_drain(), timeout=timeout_s)
+    except TimeoutError:
+        return NO_BOOT
+    except Exception as exc:
+        return f"{NO_BOOT}: {exc}"
+    if not found:
+        return NO_BOOT
+    return None
+
+
+def _no_boot_checks(message: str) -> list[Check]:
+    return [
+        Check("Serial", False, message),
+        Check("Relay", False, "cannot verify: no boot"),
+        Check("LED", False, "cannot verify: no boot"),
+        Check("Servo", False, "cannot verify: no boot"),
+    ]
+
+
+async def probe_hardware(
+    transport: Transport, *, boot_timeout_s: float = BOOT_WAIT_S
+) -> list[Check]:
     """Command the device through the Supervisor. No check may skip to green."""
+    boot_err = await wait_for_boot(transport, timeout_s=boot_timeout_s)
+    if boot_err is not None:
+        return _no_boot_checks(boot_err)
     supervisor = Supervisor(transport)
     ping_err = await _send(supervisor, PingCommand(id=1))
     led_err = await _send(supervisor, LedCommand(id=2, state=LedState.AMBER))
