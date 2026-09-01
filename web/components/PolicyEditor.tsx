@@ -20,6 +20,7 @@ export function WidenWarning({ visible }: { visible: boolean }): ReactElement | 
 
 export function PolicyEditor({ rows }: { rows: PolicyRow[] }): ReactElement {
   const [drafts, setDrafts] = useState<PolicyRow[]>(rows);
+  const [saved, setSaved] = useState<PolicyRow[]>(rows);
   const [createPattern, setCreatePattern] = useState("");
   const [message, setMessage] = useState("");
   const [confirmed, setConfirmed] = useState<Record<string, boolean>>({});
@@ -49,6 +50,8 @@ export function PolicyEditor({ rows }: { rows: PolicyRow[] }): ReactElement {
     }
     const payload = (await response.json()) as { policies: PolicyRow[] };
     setDrafts(payload.policies);
+    setSaved(payload.policies);
+    setConfirmed((current) => ({ ...current, [row.tool_pattern]: false }));
     setMessage(`Saved ${row.tool_pattern}. updated_by is shown per row.`);
   }
 
@@ -60,7 +63,7 @@ export function PolicyEditor({ rows }: { rows: PolicyRow[] }): ReactElement {
         wrote the row.
       </p>
       {drafts.map((row) => {
-        const original = rows.find((item) => item.tool_pattern === row.tool_pattern);
+        const original = saved.find((item) => item.tool_pattern === row.tool_pattern);
         const widening = isWidening(original?.action ?? "", row.action);
         return (
           <form
@@ -185,6 +188,11 @@ export function PolicyEditor({ rows }: { rows: PolicyRow[] }): ReactElement {
             updated_by: "",
           };
           setDrafts((current) =>
+            current.some((item) => item.tool_pattern === row.tool_pattern)
+              ? current
+              : [...current, row],
+          );
+          setSaved((current) =>
             current.some((item) => item.tool_pattern === row.tool_pattern)
               ? current
               : [...current, row],

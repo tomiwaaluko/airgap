@@ -4,7 +4,7 @@ export function buildCsp(nonce: string): string {
   return [
     "default-src 'self'",
     `script-src 'self' 'nonce-${nonce}'`,
-    "style-src 'self'",
+    `style-src 'self' 'nonce-${nonce}'`,
     "img-src 'self'",
     "font-src 'self'",
     "connect-src 'self'",

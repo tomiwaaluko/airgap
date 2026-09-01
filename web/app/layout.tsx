@@ -1,5 +1,4 @@
 import type { Metadata } from "next";
-import { headers } from "next/headers";
 import type { ReactElement, ReactNode } from "react";
 
 import "./globals.css";
@@ -11,15 +10,14 @@ export const metadata: Metadata = {
   description: "Live consent queue. No software approve path.",
 };
 
-export default async function RootLayout({
+export default function RootLayout({
   children,
 }: Readonly<{
   children: ReactNode;
-}>): Promise<ReactElement> {
-  const nonce = (await headers()).get("x-nonce") ?? undefined;
+}>): ReactElement {
   return (
     <html lang="en">
-      <body data-nonce={nonce}>{children}</body>
+      <body>{children}</body>
     </html>
   );
 }

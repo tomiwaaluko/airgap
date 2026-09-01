@@ -21,7 +21,7 @@ export async function GET(request: Request): Promise<Response> {
           controller.enqueue(
             encoder.encode(`data: ${JSON.stringify(snapshot)}\n\n`),
           );
-          await wait(POLL_MS, () => closed);
+          await wait(POLL_MS, request.signal, () => closed);
         }
       } catch {
         closed = true;
@@ -48,12 +48,22 @@ export async function GET(request: Request): Promise<Response> {
   });
 }
 
-function wait(ms: number, done: () => boolean): Promise<void> {
+function wait(
+  ms: number,
+  signal: AbortSignal,
+  done: () => boolean,
+): Promise<void> {
   return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    if (done()) {
-      clearTimeout(timer);
+    if (done() || signal.aborted) {
       resolve();
+      return;
     }
+    const finish = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, ms);
+    signal.addEventListener("abort", finish);
   });
 }

@@ -6,6 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import { Dashboard } from "@/components/Dashboard";
+import { LiveAudit } from "@/components/LiveAudit";
 import { LiveQueue } from "@/components/LiveQueue";
 import { PolicyEditor } from "@/components/PolicyEditor";
 
@@ -67,6 +68,16 @@ describe("no dashboard resolve path", () => {
             active: "queue",
           },
           createElement(LiveQueue),
+        ),
+      ),
+      renderToStaticMarkup(
+        createElement(
+          Dashboard,
+          {
+            initial: EMPTY_SNAPSHOT,
+            active: "audit",
+          },
+          createElement(LiveAudit),
         ),
       ),
       renderToStaticMarkup(

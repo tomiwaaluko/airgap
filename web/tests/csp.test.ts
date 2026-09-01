@@ -4,7 +4,16 @@ import { describe, expect, it } from "vitest";
 import { buildCsp, cspIsRestrictive } from "@/lib/csp";
 import { middleware } from "@/middleware";
 
-const PATHS = ["/", "/audit", "/policies", "/api/health", "/api/events"];
+const PATHS = [
+  "/",
+  "/audit",
+  "/policies",
+  "/api/health",
+  "/api/events",
+  "/api/pending",
+  "/api/audit",
+  "/api/policies",
+];
 
 describe("content-security-policy", () => {
   it("is default-src self without unsafe-inline, unsafe-eval, or remote script origin", () => {
